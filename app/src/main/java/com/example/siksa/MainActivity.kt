@@ -216,23 +216,15 @@ fun ChannelListScreen(m3uUrl: String, onBack: () -> Unit) {
                             )
                             .focusable()
                             .clickable {
-                                val intent = when {
-                                    isYouTubeUrl(channel.url) || isFacebookUrl(channel.url) -> {
-                                        Intent(context, WebViewActivity::class.java).apply {
-                                            putExtra("url", channel.url)
-                                        }
+                                val intent = if (isVideoStream(channel.url)) {
+                                    Intent(context, PlayerActivity::class.java).apply {
+                                        putExtra("streamUrl", channel.url)
+                                        putExtra("channelName", channel.name)
+                                        putExtra("drmLicense", channel.drmLicense)
                                     }
-                                    isVideoStream(channel.url) -> {
-                                        Intent(context, PlayerActivity::class.java).apply {
-                                            putExtra("streamUrl", channel.url)
-                                            putExtra("channelName", channel.name)
-                                            putExtra("drmLicense", channel.drmLicense)
-                                        }
-                                    }
-                                    else -> {
-                                        Intent(context, WebViewActivity::class.java).apply {
-                                            putExtra("url", channel.url)
-                                        }
+                                } else {
+                                    Intent(context, WebViewActivity::class.java).apply {
+                                        putExtra("url", channel.url)
                                     }
                                 }
                                 context.startActivity(intent)
@@ -369,32 +361,41 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
         "akamai", "edgecast", "cdn", "proxy", "relay", "redirect"
     )
 
-    val knownPlatforms = listOf(
-        "youtube.com", "youtu.be", "facebook.com/watch", "fb.watch", "twitch.tv", "dailymotion.com"
-    )
+    val streamProtocols = listOf("rtmp://", "rtsp://", "udp://")
 
+    // التحقق من البروتوكولات الخاصة بالبث
+    if (streamProtocols.any { lowerUrl.startsWith(it) }) return true
+
+    // التحقق من الامتدادات
     try {
         val uri = URI(lowerUrl)
-        val path = uri.path
-        if (videoExtensions.any { path.endsWith(".$it") }) return true
+        val allParts = listOfNotNull(uri.path, uri.query, uri.fragment)
+
+        if (allParts.any { part ->
+                videoExtensions.any { ext -> part.endsWith(".$ext") || part.contains(".$ext") }
+            }
+        ) return true
     } catch (_: Exception) {}
 
+    // التحقق من الكلمات المفتاحية والأنماط
     if (videoKeywords.any { lowerUrl.contains(it) }) return true
-    if (knownPlatforms.any { lowerUrl.contains(it) }) return true
     if (lowerUrl.contains("username=") && lowerUrl.contains("password=")) return true
     if (lowerUrl.contains("/series/") || lowerUrl.contains("/live/") || lowerUrl.contains("/movie/")) return true
 
+    // التحقق من نوع المحتوى من خلال الهيدر إذا طُلب ذلك
     if (checkHeader) {
         try {
             val connection = URL(url).openConnection() as HttpURLConnection
             connection.requestMethod = "HEAD"
             connection.connectTimeout = 3000
             connection.readTimeout = 3000
+            connection.instanceFollowRedirects = true
 
             val contentType = connection.contentType?.lowercase() ?: ""
             if (contentType.startsWith("video") ||
-                contentType.contains("application/vnd.apple.mpegurl") ||
-                contentType.contains("dash+xml")
+                contentType.contains("application/vnd.apple.mpegurl") ||  // HLS
+                contentType.contains("application/dash+xml") ||          // DASH
+                contentType.contains("application/x-mpegurl")
             ) {
                 return true
             }
@@ -402,13 +403,4 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
     }
 
     return false
-}
-fun isYouTubeUrl(url: String): Boolean {
-    val lower = url.lowercase()
-    return lower.contains("youtube.com/watch") || lower.contains("youtu.be/")
-}
-
-fun isFacebookUrl(url: String): Boolean {
-    val lower = url.lowercase()
-    return lower.contains("facebook.com/watch") || lower.contains("fb.watch")
 }
