@@ -5,20 +5,22 @@ import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -26,7 +28,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import coil.compose.rememberAsyncImagePainter
+import androidx.core.view.WindowInsetsCompat
+import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -34,108 +39,142 @@ import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
-
-data class Channel(
-    val name: String,
-    val url: String,
-    val logo: String,
-    val drmLicense: String = ""
-)
-
-data class PackageItem(
-    val name: String,
-    val logo: String,
-    val url: String
-)
+import com.example.siksa.PlayerActivity
+import kotlinx.parcelize.Parcelize
+import android.os.Parcelable
 
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        val controller = WindowInsetsControllerCompat(window, window.decorView)
-        controller.hide(android.view.WindowInsets.Type.statusBars())
-        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
+        val controller = WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.statusBars())
+            systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
 
         supportActionBar?.hide()
 
         setContent {
             AnimatedGradientBackground {
                 var selectedPackageUrl by remember { mutableStateOf<String?>(null) }
+                var selectedIndex by remember { mutableStateOf(0) }
+                var selectedChannelIndex by remember { mutableStateOf(0) }
 
-                if (selectedPackageUrl == null) {
-                    PackageListScreen { url -> selectedPackageUrl = url }
-                } else {
-                    ChannelListScreen(
-                        m3uUrl = selectedPackageUrl!!,
-                        onBack = { selectedPackageUrl = null }
-                    )
+                val externalM3uUrl = remember { getExternalM3uUrl() }
+
+                when {
+                    externalM3uUrl != null -> {
+                        ChannelListScreen(
+                            m3uUrl = externalM3uUrl,
+                            selectedIndex = selectedChannelIndex,
+                            onChannelClick = { selectedChannelIndex = it },
+                            onBack = { finish() }
+                        )
+                    }
+                    selectedPackageUrl == null -> {
+                        PackageListScreen(
+                            selectedIndex = selectedIndex,
+                            onPackageClick = { index, url ->
+                                selectedIndex = index
+                                selectedChannelIndex = 0
+                                selectedPackageUrl = url
+                            }
+                        )
+                    }
+                    else -> {
+                        ChannelListScreen(
+                            m3uUrl = selectedPackageUrl!!,
+                            selectedIndex = selectedChannelIndex,
+                            onChannelClick = { selectedChannelIndex = it },
+                            onBack = {
+                                selectedChannelIndex = 0
+                                selectedPackageUrl = null
+                            }
+                        )
+                    }
                 }
             }
         }
     }
-}
 
-@Composable
-fun AnimatedGradientBackground(content: @Composable () -> Unit) {
-    val infiniteTransition = rememberInfiniteTransition()
+    private fun getExternalM3uUrl(): String? {
+        return when {
+            intent?.action == Intent.ACTION_VIEW && intent.data != null -> {
+                val url = intent.data.toString()
+                if (url.endsWith(".m3u") || url.endsWith(".m3u8") || url.contains("m3u")) {
+                    url
+                } else null
+            }
+            intent?.hasExtra("m3u_url") == true -> {
+                intent.getStringExtra("m3u_url")
+            }
+            intent?.hasExtra("streamUrl") == true -> {
+                val url = intent.getStringExtra("streamUrl")
+                if (url?.endsWith(".m3u") == true || url?.endsWith(".m3u8") == true) {
+                    url
+                } else null
+            }
+            else -> null
+        }
+    }
 
-    val offset by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1000f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(10000, easing = LinearEasing)
-        )
-    )
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(
-                        Color(0xFF1e3c72),
-                        Color(0xFF2a5298),
-                        Color.Black,
-                        Color(0xFF3b1d56)
-                    ),
-                    start = Offset(0f, offset),
-                    end = Offset(offset, 0f)
-                )
-            )
-    ) {
-        content()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        recreate()
     }
 }
 
 @Composable
-fun PackageListScreen(onPackageClick: (String) -> Unit) {
+fun PackageListScreen(
+    selectedIndex: Int?,
+    onPackageClick: (Int, String) -> Unit
+) {
     var packages by remember { mutableStateOf(listOf<PackageItem>()) }
+    val listState = rememberLazyListState()
 
     LaunchedEffect(Unit) {
-        packages = loadPackagesFromM3u("https://raw.githubusercontent.com/raid35/channel-links/main/siksa.m3u")
+        packages = loadPackagesFromM3u("https://raw.githubusercontent.com/raid35/channel-links/main/siksa_tv.m3u")
+
+        selectedIndex?.let {
+            val rowIndex = it / 5
+            listState.scrollToItem(rowIndex)
+        }
     }
 
     val rows = packages.chunked(5)
 
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(rows) { rowItems ->
+        itemsIndexed(rows) { rowIndex, rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                for (pkg in rowItems) {
+                rowItems.forEachIndexed { itemIndex, pkg ->
+                    val actualIndex = rowIndex * 5 + itemIndex
                     var isFocused by remember { mutableStateOf(false) }
+                    val focusRequester = remember { FocusRequester() }
+
+                    LaunchedEffect(Unit) {
+                        if (selectedIndex == actualIndex) {
+                            focusRequester.requestFocus()
+                        }
+                    }
 
                     Card(
                         modifier = Modifier
                             .weight(1f)
                             .aspectRatio(1f)
+                            .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
                             .border(
                                 width = if (isFocused) 2.dp else 0.dp,
@@ -143,7 +182,9 @@ fun PackageListScreen(onPackageClick: (String) -> Unit) {
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .focusable()
-                            .clickable { onPackageClick(pkg.url) },
+                            .clickable {
+                                onPackageClick(actualIndex, pkg.url)
+                            },
                         shape = RoundedCornerShape(12.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.1f)),
                         elevation = CardDefaults.cardElevation(4.dp)
@@ -154,7 +195,13 @@ fun PackageListScreen(onPackageClick: (String) -> Unit) {
                             modifier = Modifier.padding(8.dp)
                         ) {
                             Image(
-                                painter = rememberAsyncImagePainter(pkg.logo),
+                                painter = rememberAsyncImagePainter(
+                                    model = ImageRequest.Builder(LocalContext.current)
+                                        .data(pkg.logo)
+                                        .setHeader("User-Agent", "Mozilla/5.0")
+                                        .crossfade(true)
+                                        .build()
+                                ),
                                 contentDescription = null,
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -170,6 +217,7 @@ fun PackageListScreen(onPackageClick: (String) -> Unit) {
                         }
                     }
                 }
+
                 repeat(5 - rowItems.size) {
                     Spacer(modifier = Modifier.weight(1f))
                 }
@@ -179,14 +227,19 @@ fun PackageListScreen(onPackageClick: (String) -> Unit) {
 }
 
 @Composable
-fun ChannelListScreen(m3uUrl: String, onBack: () -> Unit) {
+fun ChannelListScreen(
+    m3uUrl: String,
+    selectedIndex: Int,
+    onChannelClick: (Int) -> Unit,
+    onBack: () -> Unit
+) {
     val context = LocalContext.current
     var channels by remember { mutableStateOf(listOf<Channel>()) }
 
     BackHandler { onBack() }
 
     LaunchedEffect(m3uUrl) {
-        channels = loadChannels(m3uUrl) // ✅ استبدال الدالة هنا
+        channels = loadChannels(m3uUrl)
     }
 
     val rows = channels.chunked(7)
@@ -195,19 +248,29 @@ fun ChannelListScreen(m3uUrl: String, onBack: () -> Unit) {
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(rows) { rowChannels ->
+        itemsIndexed(rows) { rowIndex, rowChannels ->
             LazyRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp)
             ) {
-                items(rowChannels) { channel ->
+                itemsIndexed(rowChannels) { itemIndex, channel ->
+                    val actualIndex = rowIndex * 7 + itemIndex
                     var isFocused by remember { mutableStateOf(false) }
+                    val focusRequester = remember(channel.url) { FocusRequester() }
+
+                    LaunchedEffect(selectedIndex, channels) {
+                        if (actualIndex == selectedIndex) {
+                            delay(100)
+                            focusRequester.requestFocus()
+                        }
+                    }
 
                     Card(
                         modifier = Modifier
                             .width(120.dp)
+                            .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
                             .border(
                                 width = if (isFocused) 2.dp else 0.dp,
@@ -216,18 +279,25 @@ fun ChannelListScreen(m3uUrl: String, onBack: () -> Unit) {
                             )
                             .focusable()
                             .clickable {
-                                val intent = if (isVideoStream(channel.url)) {
-                                    Intent(context, PlayerActivity::class.java).apply {
-                                        putExtra("streamUrl", channel.url)
-                                        putExtra("channelName", channel.name)
-                                        putExtra("drmLicense", channel.drmLicense)
+                                onChannelClick(actualIndex)
+
+                                if (isVideoStream(channel.url)) {
+                                    // تجهيز قائمة الروابط فقط لإرسالها للمشغل
+                                    val allUrls = ArrayList<String>()
+                                    channels.forEach { allUrls.add(it.url) }
+
+                                    val intent = Intent(context, PlayerActivity::class.java).apply {
+                                        putExtra("streamUrl", channel.url) // الرابط الحالي
+                                        putExtra("channelIndex", actualIndex) // ترتيبه
+                                        putStringArrayListExtra("channelsList", allUrls) // كل الروابط للتبديل
                                     }
+                                    context.startActivity(intent)
                                 } else {
-                                    Intent(context, WebViewActivity::class.java).apply {
+                                    val intent = Intent(context, WebViewActivity::class.java).apply {
                                         putExtra("url", channel.url)
                                     }
+                                    context.startActivity(intent)
                                 }
-                                context.startActivity(intent)
                             },
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.1f)),
@@ -238,7 +308,13 @@ fun ChannelListScreen(m3uUrl: String, onBack: () -> Unit) {
                             modifier = Modifier.padding(12.dp)
                         ) {
                             Image(
-                                painter = rememberAsyncImagePainter(channel.logo),
+                                painter = rememberAsyncImagePainter(
+                                    model = ImageRequest.Builder(LocalContext.current)
+                                        .data(channel.logo)
+                                        .setHeader("User-Agent", "Mozilla/5.0")
+                                        .crossfade(true)
+                                        .build()
+                                ),
                                 contentDescription = null,
                                 modifier = Modifier
                                     .size(100.dp)
@@ -259,6 +335,43 @@ fun ChannelListScreen(m3uUrl: String, onBack: () -> Unit) {
     }
 }
 
+suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
+    return withContext(Dispatchers.IO) {
+        try {
+            val client = OkHttpClient()
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0")
+                .header("Accept", "*/*")
+                .header("Connection", "keep-alive")
+                .build()
+            val response = client.newCall(request).execute()
+            val content = response.body?.string() ?: ""
+            val lines = content.lines()
+
+            val packages = mutableListOf<PackageItem>()
+            var name = ""
+            var logo = ""
+
+            for (i in lines.indices) {
+                val line = lines[i].trim()
+                if (line.startsWith("#EXTINF")) {
+                    name = line.substringAfter(",").trim()
+                    logo = Regex("""tvg-logo="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
+                } else if (line.startsWith("http") && line.isNotEmpty()) {
+                    packages.add(PackageItem(name.ifEmpty { "Channel ${packages.size + 1}" }, logo, line))
+                    name = ""
+                    logo = ""
+                }
+            }
+            packages
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+}
+
 suspend fun loadChannels(url: String): List<Channel> {
     return withContext(Dispatchers.IO) {
         try {
@@ -266,6 +379,8 @@ suspend fun loadChannels(url: String): List<Channel> {
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", "Mozilla/5.0")
+                .header("Accept", "*/*")
+                .header("Connection", "keep-alive")
                 .build()
             val response = client.newCall(request).execute()
             val content = response.body?.string() ?: ""
@@ -273,19 +388,33 @@ suspend fun loadChannels(url: String): List<Channel> {
             if (url.endsWith(".json") || content.trim().startsWith("[")) {
                 val jsonArray = JSONArray(content)
                 val channels = mutableListOf<Channel>()
+
                 for (i in 0 until jsonArray.length()) {
                     val item = jsonArray.getJSONObject(i)
+
                     val name = item.optString("name")
                     val streamUrl = item.optString("url")
                     val logo = item.optString("logo")
+
+                    var drmLicense = ""
+
+                    val drmObject = item.optJSONObject("drm")
+                    if (drmObject != null) {
+                        val scheme = drmObject.optString("scheme", "")
+                        val kid = drmObject.optString("kid", "")
+                        val key = drmObject.optString("key", "")
+                        if (scheme.isNotEmpty() && kid.isNotEmpty() && key.isNotEmpty()) {
+                            drmLicense = "$scheme:$kid:$key"
+                        }
+                    }
+
                     val licenseType = item.optString("license_type", "")
                     val licenseKey = item.optString("license_key", "")
-                    val drm = if (licenseType.isNotEmpty() && licenseKey.isNotEmpty())
-                        "$licenseType:$licenseKey"
-                    else
-                        ""
+                    if (licenseType.isNotEmpty() && licenseKey.isNotEmpty()) {
+                        drmLicense = "$licenseType:$licenseKey"
+                    }
 
-                    channels.add(Channel(name, streamUrl, logo, drm))
+                    channels.add(Channel(name, streamUrl, logo, drmLicense))
                 }
                 channels
             } else {
@@ -293,13 +422,27 @@ suspend fun loadChannels(url: String): List<Channel> {
                 val channels = mutableListOf<Channel>()
                 var name = ""
                 var logo = ""
+                var group = ""
+
                 for (i in lines.indices) {
-                    val line = lines[i]
+                    val line = lines[i].trim()
                     if (line.startsWith("#EXTINF")) {
                         name = line.substringAfter(",").trim()
                         logo = Regex("""tvg-logo="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
-                    } else if (line.startsWith("http")) {
-                        channels.add(Channel(name, line.trim(), logo))
+                        group = Regex("""group-title="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
+                    } else if (line.startsWith("http") && line.isNotEmpty()) {
+                        channels.add(
+                            Channel(
+                                name = name.ifEmpty { "Channel ${channels.size + 1}" },
+                                url = line,
+                                logo = logo,
+                                drmLicense = "",
+                                group = group
+                            )
+                        )
+                        name = ""
+                        logo = ""
+                        group = ""
                     }
                 }
                 channels
@@ -311,39 +454,23 @@ suspend fun loadChannels(url: String): List<Channel> {
     }
 }
 
-suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
-    return withContext(Dispatchers.IO) {
-        try {
-            val client = OkHttpClient()
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "Mozilla/5.0")
-                .build()
-            val response = client.newCall(request).execute()
-            val content = response.body?.string() ?: ""
-            val lines = content.lines()
+fun isMacPortalUrl(url: String): Boolean {
+    val lowerUrl = url.lowercase()
+    return (lowerUrl.contains("mac=") && lowerUrl.contains("stream=")) ||
+            (lowerUrl.contains("/play/") && lowerUrl.contains("live.php")) ||
+            (lowerUrl.contains("play_token=")) ||
+            (lowerUrl.contains("/streaming/") && lowerUrl.contains("mac=")) ||
+            (lowerUrl.contains("extension=ts") && lowerUrl.contains("mac="))
+}
 
-            val packages = mutableListOf<PackageItem>()
-            var name = ""
-            var logo = ""
-
-            for (i in lines.indices) {
-                val line = lines[i]
-                if (line.startsWith("#EXTINF")) {
-                    name = line.substringAfter(",").trim()
-                    logo = Regex("""tvg-logo="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
-                } else if (line.startsWith("http")) {
-                    packages.add(PackageItem(name, logo, line.trim()))
-                    name = ""
-                    logo = ""
-                }
-            }
-            packages
-        } catch (e: Exception) {
-            e.printStackTrace()
-            emptyList()
-        }
-    }
+fun isXtreamCodesUrl(url: String): Boolean {
+    val lowerUrl = url.lowercase()
+    return (lowerUrl.contains("username=") && lowerUrl.contains("password=")) ||
+            lowerUrl.contains("/live/") ||
+            lowerUrl.contains("/movie/") ||
+            lowerUrl.contains("/series/") ||
+            lowerUrl.contains("get.php") ||
+            lowerUrl.contains("player_api.php")
 }
 
 fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
@@ -404,3 +531,5 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
 
     return false
 }
+
+
