@@ -2,24 +2,36 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.0"
+    id("kotlin-parcelize")
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21"
 }
 
 android {
     namespace = "com.example.siksa"
-    compileSdk = 36
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.example.siksa"
-        minSdk = 21
-        targetSdk = 36
-        versionCode = 4003  // رقم داخلي للإصدار
-        versionName = "4.3" // رقم النسخة الظاهري
+        minSdk = 23
+        targetSdk = 35
+        versionCode = 4003
+        versionName = "4.3"
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        vectorDrawables {
+            useSupportLibrary = true
+        }
+    }
+
+    androidResources {
+        localeFilters += listOf("ar", "en")
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -28,12 +40,12 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
 
     kotlinOptions {
-        jvmTarget = "21"
+        jvmTarget = "1.8"
     }
 
     buildFeatures {
@@ -41,60 +53,63 @@ android {
     }
 
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.15"
+        kotlinCompilerExtensionVersion = "1.5.4"
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+        jniLibs {
+            useLegacyPackaging = false
+        }
     }
 }
 
-val media3_version = "1.6.1"
-
 dependencies {
-    // Compose BOM
-    val composeBom = platform("androidx.compose:compose-bom:2025.02.00")
-    implementation(composeBom)
-    androidTestImplementation(composeBom)
+    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.activity)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.webkit)
 
-    // Compose UI
-    implementation("androidx.compose.ui:ui")
-    implementation("androidx.compose.foundation:foundation")
-    implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material:material-icons-extended")
+    // Compose
+    implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.ui)
+    implementation(libs.androidx.compose.ui.graphics)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.compose.material3)
+    debugImplementation(libs.androidx.compose.ui.tooling)
 
-    // Coil
-    implementation("io.coil-kt:coil-compose:2.4.0")
+    // TV Support
+    implementation(libs.androidx.tv.foundation)
+    implementation(libs.androidx.tv.material)
 
-    // ExoPlayer - Media3
-    implementation("androidx.media3:media3-exoplayer:$media3_version")
-    implementation("androidx.media3:media3-ui:$media3_version")
+    // Coil for image loading
+    implementation(libs.coil.compose)
 
-    // For HLS playback support (m3u8)
-    implementation("androidx.media3:media3-exoplayer-hls:$media3_version")
+    // Media3 (ExoPlayer)
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.ui)
+    implementation(libs.media3.ui.compose)
+    implementation(libs.media3.exoplayer.hls)
+    implementation(libs.media3.exoplayer.dash)
+    implementation(libs.media3.datasource.okhttp)
+    implementation(libs.media3.session)
+    // OkHttp لدعم HTTPS مع منافذ مخصصة
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // For DASH playback support (mpd)
-    implementation("androidx.media3:media3-exoplayer-dash:$media3_version")
+    // Navigation
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.constraintlayout.compose)
 
-    // Optional: For loading data using OkHttp (if needed)
-    implementation("androidx.media3:media3-datasource-okhttp:$media3_version")
-    implementation("androidx.media3:media3-session:$media3_version")
+    // Serialization
+    implementation(libs.kotlinx.serialization.json)
 
-    // AndroidX الأساسية
-    implementation("androidx.core:core-ktx:1.9.0")
-    implementation("androidx.appcompat:appcompat:1.5.1")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.5.1")
-    implementation("androidx.activity:activity-compose:1.8.2")
-
-    val activity_version = "1.10.1"
-
-    // Java language implementation
-    implementation("androidx.activity:activity:$activity_version")
-    // Kotlin
-    implementation("androidx.activity:activity-ktx:$activity_version")
-
-    // Compose أدوات
-    debugImplementation("androidx.compose.ui:ui-tooling")
-    debugImplementation("androidx.compose.ui:ui-test-manifest")
-    testImplementation("androidx.compose.ui:ui-test-junit4")
-    androidTestImplementation("androidx.compose.ui:ui-test")
-
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
+    // Testing
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.espresso.core)
 }
