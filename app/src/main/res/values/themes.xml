@@ -1,4 +1,14 @@
+<!-- res/values/themes.xml -->
 <resources>
+    <!-- الثيم الأساسي للتطبيق -->
+    <style name="Theme.siksa" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
 
-    <style name="Theme.Siksa" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <!-- ثيم الشاشة الكاملة -->
+    <style name="Theme.Siksa.Fullscreen" parent="Theme.siksa">
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
 </resources>
