@@ -34,7 +34,9 @@ class PlayerActivity : AppCompatActivity() {
     private var isRecovering = false
     private var lastPlaybackPosition = 0L
     private var stallCheckRunnable: Runnable? = null
-    private val stallCheckInterval = 2000L
+    private val stallCheckInterval = 3000L // زيادة من 2000 إلى 3000ms
+    private var stallCounter = 0 // عداد التوقف المتكرر
+    private val maxStallCount = 3 // عدد مرات التوقف قبل Recovery
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,15 +110,20 @@ class PlayerActivity : AppCompatActivity() {
         val finalUrl = inputUrl.trim().split("\n").find { it.startsWith("http") } ?: return
 
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(15000, 50000, 1500, 3000)
+            .setBufferDurationsMs(
+                30000,  // min_buffer_ms: 30 ثانية (بدل 15)
+                90000,  // max_buffer_ms: 90 ثانية (بدل 50)
+                2500,   // buffer_for_playback_ms: 2.5 ثانية (بدل 1.5)
+                5000    // buffer_for_playback_after_rebuffer_ms: 5 ثوان (بدل 3)
+            )
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
         val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
             setUserAgent("VLC/3.0.0 (Windows NT 10.0; Win64; x64)")
             setAllowCrossProtocolRedirects(true)
-            setConnectTimeoutMs(15000)
-            setReadTimeoutMs(15000)
+            setConnectTimeoutMs(20000) // زيادة من 15 إلى 20 ثانية
+            setReadTimeoutMs(20000)    // زيادة من 15 إلى 20 ثانية
         }
 
         val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
@@ -140,12 +147,26 @@ class PlayerActivity : AppCompatActivity() {
                         handleRecovery()
                     }
                     override fun onPlaybackStateChanged(state: Int) {
-                        if (state == Player.STATE_READY) {
-                            startStallDetection()
-                        } else if (state == Player.STATE_BUFFERING) {
-                            playerView.postDelayed({
-                                if (playbackState == Player.STATE_BUFFERING) handleRecovery()
-                            }, 15000)
+                        when (state) {
+                            Player.STATE_READY -> {
+                                stallCounter = 0 // إعادة تعيين العداد
+                                startStallDetection()
+                            }
+                            Player.STATE_BUFFERING -> {
+                                // زيادة timeout إلى 30 ثانية للبث الحي
+                                playerView.postDelayed({
+                                    if (playbackState == Player.STATE_BUFFERING) {
+                                        handleRecovery()
+                                    }
+                                }, 30000)
+                            }
+                            Player.STATE_ENDED -> {
+                                // إعادة تشغيل تلقائية للبث المباشر
+                                if (!channelsList.isNullOrEmpty()) {
+                                    player?.seekToDefaultPosition()
+                                    player?.prepare()
+                                }
+                            }
                         }
                     }
                 })
@@ -154,13 +175,21 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun startStallDetection() {
         stopStallDetection()
+        stallCounter = 0
         stallCheckRunnable = Runnable {
             val p = player ?: return@Runnable
             if (p.isPlaying && p.playbackState == Player.STATE_READY) {
                 val currentPos = p.currentPosition
+                // التحقق من التوقف فقط للبث المباشر (التحقق من أن المسافة المتقدمة صغيرة جداً)
                 if (currentPos == lastPlaybackPosition && currentPos > 0) {
-                    handleRecovery()
-                    return@Runnable
+                    stallCounter++
+                    // فقط بعد 3 توقفات متتالية نقوم ب Recovery
+                    if (stallCounter >= maxStallCount) {
+                        handleRecovery()
+                        return@Runnable
+                    }
+                } else {
+                    stallCounter = 0 // إعادة تعيين إذا تقدم التشغيل
                 }
                 lastPlaybackPosition = currentPos
             }
@@ -177,15 +206,29 @@ class PlayerActivity : AppCompatActivity() {
     private fun handleRecovery() {
         if (isRecovering) return
         isRecovering = true
+        stallCounter = 0
+
         player?.let {
             val currentMediaItem = it.currentMediaItem
-            it.stop()
-            it.clearMediaItems()
-            if (currentMediaItem != null) it.setMediaItem(currentMediaItem)
-            it.prepare()
-            it.play()
+            val currentPos = it.currentPosition
+
+            try {
+                it.stop()
+                it.clearMediaItems()
+                if (currentMediaItem != null) {
+                    it.setMediaItem(currentMediaItem)
+                    // الانتظار قليلاً قبل استئناف التشغيل
+                    it.seekTo(currentPos)
+                }
+                it.prepare()
+                it.play()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
-        playerView.postDelayed({ isRecovering = false }, 3000)
+
+        // زيادة وقت انتظار الاستقرار من 3 إلى 5 ثوان
+        playerView.postDelayed({ isRecovering = false }, 5000)
     }
 
     private fun changeChannel(next: Boolean) {
@@ -214,7 +257,24 @@ class PlayerActivity : AppCompatActivity() {
         return super.dispatchKeyEvent(event)
     }
 
-    override fun onResume() { super.onResume(); applyImmersiveMode(); player?.play() }
-    override fun onPause() { super.onPause(); player?.pause() }
-    override fun onDestroy() { super.onDestroy(); stopStallDetection(); player?.release(); player = null }
+    override fun onResume() {
+        super.onResume()
+        applyImmersiveMode()
+        player?.play()
+        startStallDetection()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        player?.pause()
+        stopStallDetection()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopStallDetection()
+        player?.stop()
+        player?.release()
+        player = null
+    }
 }
