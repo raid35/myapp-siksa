@@ -22,9 +22,23 @@ import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
+
+    // قائمة الـ User-Agents المأخوذة من كود Catch-up TV (بايثون)
+    private val userAgents = listOf(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.3351.121",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Vivaldi/7.0.3495.26"
+    )
+
+    private fun getRandomUserAgent(): String {
+        return userAgents.random()
+    }
 
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
@@ -53,7 +67,7 @@ class PlayerActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
         }
 
-        // 2. مشغل الفيديو
+        // 2. مشغل الفيديو - محسّن للأبعاد
         playerView = PlayerView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -63,35 +77,32 @@ class PlayerActivity : AppCompatActivity() {
             useController = false
             setOnTouchListener { _, _ -> true }
             isFocusable = false
+            // تحسين دالة الأبعاد الاحترافية
+            resizeMode = getOptimalResizeMode()
         }
         rootLayout.addView(playerView)
 
-        // --- إضافة العلامة المائية المحدثة (جهة اليسار، أصغر، وأكثر شفافية) ---
+        setContentView(rootLayout)
         val watermark = TextView(this).apply {
             text = "S"
-            textSize = 14f // تصغير حجم الخط قليلاً
+            textSize = 14f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            alpha = 0.3f // زيادة الشفافية (خفيفة جداً الآن)
-
-            // تصميم الدائرة خلف الحرف
+            alpha = 0.3f
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#22000000")) // لون أسود شبه شفاف
-                setStroke(1, Color.WHITE) // إطار أبيض أنحف (1 بدل 2)
+                setColor(Color.parseColor("#22000000"))
+                setStroke(1, Color.WHITE)
             }
-
-            // تحديد الحجم والموقع (الزاوية اليسرى السفلى)
-            val size = (35 * resources.displayMetrics.density).toInt() // تصغير قطر الدائرة
+            val size = (35 * resources.displayMetrics.density).toInt()
             layoutParams = FrameLayout.LayoutParams(size, size).apply {
-                gravity = Gravity.BOTTOM or Gravity.START // جهة اليسار
-                setMargins(40, 0, 0, 30) // 40 من اليسار و 30 من الأسفل
+                gravity = Gravity.BOTTOM or Gravity.START
+                setMargins(40, 0, 0, 30)
             }
         }
         rootLayout.addView(watermark)
 
         setContentView(rootLayout)
-
         channelsList = intent.getStringArrayListExtra("channelsList")
         currentChannelIndex = intent.getIntExtra("channelIndex", 0)
         val singleUrl = intent.getStringExtra("streamUrl")
@@ -109,35 +120,65 @@ class PlayerActivity : AppCompatActivity() {
 
         val finalUrl = inputUrl.trim().split("\n").find { it.startsWith("http") } ?: return
 
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                30000,  // min_buffer_ms: 30 ثانية (بدل 15)
-                90000,  // max_buffer_ms: 90 ثانية (بدل 50)
-                2500,   // buffer_for_playback_ms: 2.5 ثانية (بدل 1.5)
-                5000    // buffer_for_playback_after_rebuffer_ms: 5 ثوان (بدل 3)
+        // 1. إعداد محدد المسارات
+        val trackSelector = DefaultTrackSelector(this).apply {
+            setParameters(buildUponParameters()
+                .setPreferredTextLanguage("ar")
+                .setPreferredAudioLanguages("ar", "fr")
+                .setSelectUndeterminedTextLanguage(true)
             )
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build()
+        }
 
+        // 2. إعداد مصدر البيانات (التبديل الذكي بين VLC والمتصفح)
         val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
-            setUserAgent("VLC/3.0.0 (Windows NT 10.0; Win64; x64)")
+
+            // اختيار الهوية بناءً على الرابط
+            val selectedUA = if (finalUrl.contains("mada") || finalUrl.contains(":4443")) {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            } else {
+                "VLC/3.0.0 LibVLC/3.0.0" // العودة لـ VLC لبقية الروابط لضمان عملها
+            }
+
+            setUserAgent(selectedUA)
+
+            val headers = mutableMapOf<String, String>()
+            headers["User-Agent"] = selectedUA
+
+            // إعداد الـ Referer ذكياً
+            if (finalUrl.contains("mada") || finalUrl.contains(":4443")) {
+                headers["Accept"] = "*/*"
+                // روابط mada غالباً لا تحتاج referer أو Origin
+            } else {
+                try {
+                    val uri = android.net.Uri.parse(finalUrl)
+                    val baseUrl = "${uri.scheme}://${uri.host}/"
+                    headers["Referer"] = baseUrl
+                    headers["Origin"] = baseUrl
+                } catch (e: Exception) { }
+            }
+
+            setDefaultRequestProperties(headers)
             setAllowCrossProtocolRedirects(true)
-            setConnectTimeoutMs(20000) // زيادة من 15 إلى 20 ثانية
-            setReadTimeoutMs(20000)    // زيادة من 15 إلى 20 ثانية
+            setConnectTimeoutMs(15000)
+            setReadTimeoutMs(15000)
         }
 
         val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
 
+        // 3. بناء المشغل
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
-            .setLoadControl(loadControl)
+            .setTrackSelector(trackSelector)
+            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(30000, 60000, 2500, 5000).build())
             .build()
             .apply {
                 playerView.player = this
+
                 val mediaItemBuilder = MediaItem.Builder().setUri(finalUrl)
                 if (finalUrl.contains("m3u8", true)) {
                     mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
                 }
+
                 setMediaItem(mediaItemBuilder.build())
                 prepare()
                 playWhenReady = true
@@ -146,25 +187,22 @@ class PlayerActivity : AppCompatActivity() {
                     override fun onPlayerError(error: PlaybackException) {
                         handleRecovery()
                     }
+
                     override fun onPlaybackStateChanged(state: Int) {
                         when (state) {
                             Player.STATE_READY -> {
-                                stallCounter = 0 // إعادة تعيين العداد
+                                stallCounter = 0
                                 startStallDetection()
                             }
                             Player.STATE_BUFFERING -> {
-                                // زيادة timeout إلى 30 ثانية للبث الحي
                                 playerView.postDelayed({
-                                    if (playbackState == Player.STATE_BUFFERING) {
-                                        handleRecovery()
-                                    }
+                                    if (playbackState == Player.STATE_BUFFERING) handleRecovery()
                                 }, 30000)
                             }
                             Player.STATE_ENDED -> {
-                                // إعادة تشغيل تلقائية للبث المباشر
                                 if (!channelsList.isNullOrEmpty()) {
-                                    player?.seekToDefaultPosition()
-                                    player?.prepare()
+                                    seekToDefaultPosition()
+                                    prepare()
                                 }
                             }
                         }
@@ -172,7 +210,6 @@ class PlayerActivity : AppCompatActivity() {
                 })
             }
     }
-
     private fun startStallDetection() {
         stopStallDetection()
         stallCounter = 0
@@ -231,6 +268,31 @@ class PlayerActivity : AppCompatActivity() {
         playerView.postDelayed({ isRecovering = false }, 5000)
     }
 
+    private fun getOptimalResizeMode(): Int {
+        val displayMetrics = resources.displayMetrics
+        val screenWidth = displayMetrics.widthPixels
+        val screenHeight = displayMetrics.heightPixels
+
+        // حساب نسبة العرض إلى الارتفاع للشاشة
+        val screenAspectRatio = screenWidth.toFloat() / screenHeight.toFloat()
+
+        // إذا كانت الشاشة بنسبة عريضة جداً (عرضية) أو مربعة تقريباً
+        return when {
+            screenAspectRatio > 1.5f || screenAspectRatio < 0.67f -> {
+                // للهواتف العريضة جداً أو الطويلة جداً: استخدم FILL
+                AspectRatioFrameLayout.RESIZE_MODE_FILL
+            }
+            screenWidth < 540 || screenHeight < 960 -> {
+                // للهواتف الصغيرة جداً: استخدم ZOOM قليل
+                AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+            }
+            else -> {
+                // للهواتف العادية والكبيرة: استخدم FIT للحفاظ على النسبة
+                AspectRatioFrameLayout.RESIZE_MODE_FIT
+            }
+        }
+    }
+
     private fun changeChannel(next: Boolean) {
         val list = channelsList ?: return
         currentChannelIndex = if (next) (currentChannelIndex + 1) % list.size
@@ -248,9 +310,32 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
+            val p = player ?: return super.dispatchKeyEvent(event)
+
             when (event.keyCode) {
+                // زر الأعلى والأسفل لتغيير القنوات كما هي
                 KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { changeChannel(true); return true }
                 KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { changeChannel(false); return true }
+
+                // زر اليمين: تقديم 10 ثوانٍ (إذا كان متاحاً في القناة أو الفيلم)
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    if (p.isCurrentMediaItemSeekable) {
+                        val seekPosition = p.currentPosition + 10000
+                        // التأكد من عدم تجاوز نهاية البث المتاح
+                        p.seekTo(minOf(seekPosition, p.duration))
+                    }
+                    return true
+                }
+
+                // زر اليسار: تأخير 10 ثوانٍ (للرجوع للخلف في الفيلم أو البث المباشر المتاح)
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    if (p.isCurrentMediaItemSeekable) {
+                        val seekPosition = p.currentPosition - 10000
+                        p.seekTo(maxOf(0, seekPosition))
+                    }
+                    return true
+                }
+
                 KeyEvent.KEYCODE_BACK -> { finish(); return true }
             }
         }
