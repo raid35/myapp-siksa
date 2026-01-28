@@ -122,10 +122,11 @@ class PlayerActivity : AppCompatActivity() {
 
         // 1. إعداد محدد المسارات
         val trackSelector = DefaultTrackSelector(this).apply {
-            setParameters(buildUponParameters()
-                .setPreferredTextLanguage("ar")
-                .setPreferredAudioLanguages("ar", "fr")
-                .setSelectUndeterminedTextLanguage(true)
+            setParameters(
+                buildUponParameters()
+                    .setPreferredTextLanguage("ar")
+                    .setPreferredAudioLanguages("ar", "fr")
+                    .setSelectUndeterminedTextLanguage(true)
             )
         }
 
@@ -154,7 +155,8 @@ class PlayerActivity : AppCompatActivity() {
                     val baseUrl = "${uri.scheme}://${uri.host}/"
                     headers["Referer"] = baseUrl
                     headers["Origin"] = baseUrl
-                } catch (e: Exception) { }
+                } catch (e: Exception) {
+                }
             }
 
             setDefaultRequestProperties(headers)
@@ -169,7 +171,9 @@ class PlayerActivity : AppCompatActivity() {
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setTrackSelector(trackSelector)
-            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(30000, 60000, 2500, 5000).build())
+            .setLoadControl(
+                DefaultLoadControl.Builder().setBufferDurationsMs(30000, 60000, 2500, 5000).build()
+            )
             .build()
             .apply {
                 playerView.player = this
@@ -194,11 +198,13 @@ class PlayerActivity : AppCompatActivity() {
                                 stallCounter = 0
                                 startStallDetection()
                             }
+
                             Player.STATE_BUFFERING -> {
                                 playerView.postDelayed({
                                     if (playbackState == Player.STATE_BUFFERING) handleRecovery()
                                 }, 30000)
                             }
+
                             Player.STATE_ENDED -> {
                                 if (!channelsList.isNullOrEmpty()) {
                                     seekToDefaultPosition()
@@ -210,6 +216,7 @@ class PlayerActivity : AppCompatActivity() {
                 })
             }
     }
+
     private fun startStallDetection() {
         stopStallDetection()
         stallCounter = 0
@@ -282,10 +289,12 @@ class PlayerActivity : AppCompatActivity() {
                 // للهواتف العريضة جداً أو الطويلة جداً: استخدم FILL
                 AspectRatioFrameLayout.RESIZE_MODE_FILL
             }
+
             screenWidth < 540 || screenHeight < 960 -> {
                 // للهواتف الصغيرة جداً: استخدم ZOOM قليل
                 AspectRatioFrameLayout.RESIZE_MODE_ZOOM
             }
+
             else -> {
                 // للهواتف العادية والكبيرة: استخدم FIT للحفاظ على النسبة
                 AspectRatioFrameLayout.RESIZE_MODE_FIT
@@ -313,30 +322,44 @@ class PlayerActivity : AppCompatActivity() {
             val p = player ?: return super.dispatchKeyEvent(event)
 
             when (event.keyCode) {
-                // زر الأعلى والأسفل لتغيير القنوات كما هي
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { changeChannel(true); return true }
-                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { changeChannel(false); return true }
+                // زر OK أو Enter للإيقاف والتشغيل
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    if (p.isPlaying) {
+                        p.pause()
+                    } else {
+                        p.play()
+                    }
+                    return true
+                }
 
-                // زر اليمين: تقديم 10 ثوانٍ (إذا كان متاحاً في القناة أو الفيلم)
+                // زر الأعلى والأسفل لتغيير القنوات
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
+                    changeChannel(true); return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                    changeChannel(false); return true
+                }
+
+                // زر اليمين: تقديم 10 ثوانٍ
                 KeyEvent.KEYCODE_DPAD_RIGHT -> {
                     if (p.isCurrentMediaItemSeekable) {
-                        val seekPosition = p.currentPosition + 10000
-                        // التأكد من عدم تجاوز نهاية البث المتاح
-                        p.seekTo(minOf(seekPosition, p.duration))
+                        p.seekTo(minOf(p.currentPosition + 10000, p.duration))
                     }
                     return true
                 }
 
-                // زر اليسار: تأخير 10 ثوانٍ (للرجوع للخلف في الفيلم أو البث المباشر المتاح)
+                // زر اليسار: تأخير 10 ثوانٍ
                 KeyEvent.KEYCODE_DPAD_LEFT -> {
                     if (p.isCurrentMediaItemSeekable) {
-                        val seekPosition = p.currentPosition - 10000
-                        p.seekTo(maxOf(0, seekPosition))
+                        p.seekTo(maxOf(0, p.currentPosition - 10000))
                     }
                     return true
                 }
 
-                KeyEvent.KEYCODE_BACK -> { finish(); return true }
+                KeyEvent.KEYCODE_BACK -> {
+                    finish(); return true
+                }
             }
         }
         return super.dispatchKeyEvent(event)
@@ -362,4 +385,5 @@ class PlayerActivity : AppCompatActivity() {
         player?.release()
         player = null
     }
+
 }
