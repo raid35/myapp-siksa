@@ -12,77 +12,74 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AppCompatActivity
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
+import androidx.media3.common.*
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.ui.PlayerView
 import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import okhttp3.OkHttpClient
+import java.security.cert.X509Certificate
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import javax.net.ssl.*
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
-
-    // قائمة الـ User-Agents المأخوذة من كود Catch-up TV (بايثون)
-    private val userAgents = listOf(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.3351.121",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Vivaldi/7.0.3495.26"
-    )
-
-    private fun getRandomUserAgent(): String {
-        return userAgents.random()
-    }
 
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
     private var channelsList: ArrayList<String>? = null
     private var currentChannelIndex = 0
-
     private var isRecovering = false
     private var lastPlaybackPosition = 0L
+
+    // --- التعديلات هنا ---
+
+    // فحص التعطل كل 2 ثانية بدل 3 لسرعة الاستجابة
     private var stallCheckRunnable: Runnable? = null
-    private val stallCheckInterval = 3000L // زيادة من 2000 إلى 3000ms
-    private var stallCounter = 0 // عداد التوقف المتكرر
-    private val maxStallCount = 3 // عدد مرات التوقف قبل Recovery
+    private val stallCheckInterval = 2000L
+
+    // إذا توقف العداد مرتين (4 ثوانٍ ثبات) نعتبر البث متوقفاً
+    private var stallCounter = 0
+    private val maxStallCount = 2
+
+    // زيادة عدد محاولات الاستعادة لأن روابط IPTV كثيرة الانقطاع
+    private var recoveryAttempts = 0
+    private val maxRecoveryAttempts = 20
+
+    private var lastErrorTime = 0L
+    private val minErrorInterval = 1000L // تقليل الفاصل الزمني بين الأخطاء
+    private var consecutiveErrors = 0
+    private val maxConsecutiveErrors = 10
+
+    // تقليل مهلة التحميل (Buffering) لـ 10 ثوانٍ
+    // إذا بقي يحمل أكثر من ذلك، يقوم بإعادة الاتصال فوراً
+    private var bufferingTimeout: Runnable? = null
+    private val bufferingTimeoutInterval = 10000L
+
+    // ----------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveMode()
 
-        // 1. الحاوية الرئيسية
         val rootLayout = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.BLACK)
         }
 
-        // 2. مشغل الفيديو - محسّن للأبعاد
         playerView = PlayerView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
-            )
+            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             useController = false
-            setOnTouchListener { _, _ -> true }
-            isFocusable = false
-            // تحسين دالة الأبعاد الاحترافية
-            resizeMode = getOptimalResizeMode()
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         }
         rootLayout.addView(playerView)
 
-        setContentView(rootLayout)
         val watermark = TextView(this).apply {
             text = "S"
             textSize = 14f
@@ -103,6 +100,7 @@ class PlayerActivity : AppCompatActivity() {
         rootLayout.addView(watermark)
 
         setContentView(rootLayout)
+
         channelsList = intent.getStringArrayListExtra("channelsList")
         currentChannelIndex = intent.getIntExtra("channelIndex", 0)
         val singleUrl = intent.getStringExtra("streamUrl")
@@ -113,201 +111,241 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    // عميل HTTP مرن جداً يتجاهل أخطاء الشهادات ليدعم المنفذ 4443
+    @android.annotation.SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
+    private fun getUnsafeOkHttpClient(): OkHttpClient {
+        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+        })
+
+        val sslContext = SSLContext.getInstance("SSL")
+        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+
+        return OkHttpClient.Builder()
+            .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
+            .hostnameVerifier { _, _ -> true }
+            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+    }
+
     private fun initializePlayer(inputUrl: String) {
+        // 1. تنظيف وإيقاف أي مشغل قديم
         stopStallDetection()
+        stopBufferingTimeout()
         player?.release()
         isRecovering = false
+        recoveryAttempts = 0
+        consecutiveErrors = 0
 
-        val finalUrl = inputUrl.trim().split("\n").find { it.startsWith("http") } ?: return
+        // 2. تحليل الرابط واستخراج البيانات
+        val fullPath = inputUrl.trim().split("\n").find { it.startsWith("http") } ?: return
+        val parts = fullPath.split("|")
+        val url = parts[0].trim()
+        val drmLicense = if (parts.size > 1) parts[1].substringAfter("drmLicense=", "").substringBefore("&") else ""
 
-        // 1. إعداد محدد المسارات
+        // 3. إعداد محدد المسارات (صوت وترجمة)
         val trackSelector = DefaultTrackSelector(this).apply {
             setParameters(
                 buildUponParameters()
+                    .setPreferredAudioLanguages("ar", "fr", "en")
                     .setPreferredTextLanguage("ar")
-                    .setPreferredAudioLanguages("ar", "fr")
                     .setSelectUndeterminedTextLanguage(true)
             )
         }
 
-        // 2. إعداد مصدر البيانات (التبديل الذكي بين VLC والمتصفح)
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory().apply {
+        // 4. إعداد التحكم في التخزين المؤقت (لمنع فصل السيرفر)
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(2500, 30000, 1000, 1500)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
 
-            // اختيار الهوية بناءً على الرابط
-            val selectedUA = if (finalUrl.contains("mada") || finalUrl.contains(":4443")) {
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            } else {
-                "VLC/3.0.0 LibVLC/3.0.0" // العودة لـ VLC لبقية الروابط لضمان عملها
-            }
-
-            setUserAgent(selectedUA)
-
-            val headers = mutableMapOf<String, String>()
-            headers["User-Agent"] = selectedUA
-
-            // إعداد الـ Referer ذكياً
-            if (finalUrl.contains("mada") || finalUrl.contains(":4443")) {
-                headers["Accept"] = "*/*"
-                // روابط mada غالباً لا تحتاج referer أو Origin
-            } else {
-                try {
-                    val uri = android.net.Uri.parse(finalUrl)
-                    val baseUrl = "${uri.scheme}://${uri.host}/"
-                    headers["Referer"] = baseUrl
-                    headers["Origin"] = baseUrl
-                } catch (e: Exception) {
-                }
-            }
-
-            setDefaultRequestProperties(headers)
-            setAllowCrossProtocolRedirects(true)
-            setConnectTimeoutMs(15000)
-            setReadTimeoutMs(15000)
+        // 5. إعداد الاتصال والـ User-Agent
+        val dynamicUserAgent = if (url.contains("mada")) {
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        } else {
+            "VLC/3.0.0 LibVLC/3.0.0"
         }
 
-        val dataSourceFactory = DefaultDataSource.Factory(this, httpDataSourceFactory)
+        val okHttpFactory = OkHttpDataSource.Factory(getUnsafeOkHttpClient())
+            .setUserAgent(dynamicUserAgent)
+            .setDefaultRequestProperties(mapOf(
+                "Connection" to "keep-alive",
+                "Icy-MetaData" to "1"
+            ))
 
-        // 3. بناء المشغل
+        if (url.contains("mada")) {
+            okHttpFactory.setDefaultRequestProperties(mapOf(
+                "Referer" to "https://mada.ps/",
+                "Origin" to "https://mada.ps"
+            ))
+        }
+
+        // 6. بناء MediaItem مع دعم DRM ونوع الملف
+        val mediaItemBuilder = MediaItem.Builder().setUri(url)
+
+        if (drmLicense.contains(":")) {
+            val (kid, key) = drmLicense.split(":")
+            val json = """{"keys":[{"kty":"oct","k":"$key","kid":"$kid"}],"type":"temporary"}"""
+            val base64 = android.util.Base64.encodeToString(json.toByteArray(), android.util.Base64.NO_WRAP)
+            mediaItemBuilder.setDrmConfiguration(
+                MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
+                    .setLicenseUri("data:application/json;base64,$base64")
+                    .build()
+            )
+        }
+
+        if (url.contains(".mpd")) mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+        else if (url.contains(".m3u8")) mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+
+        // 7. بناء المشغل النهائي (مرة واحدة فقط)
         player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .setTrackSelector(trackSelector)
-            .setLoadControl(
-                DefaultLoadControl.Builder().setBufferDurationsMs(30000, 60000, 2500, 5000).build()
+            .setLoadControl(loadControl)
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(this)
+                    .setDataSourceFactory(DefaultDataSource.Factory(this, okHttpFactory))
+                    .setLiveTargetOffsetMs(5000)
             )
             .build()
             .apply {
                 playerView.player = this
-
-                val mediaItemBuilder = MediaItem.Builder().setUri(finalUrl)
-                if (finalUrl.contains("m3u8", true)) {
-                    mediaItemBuilder.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8)
-                }
-
                 setMediaItem(mediaItemBuilder.build())
                 prepare()
                 playWhenReady = true
 
+                // إضافة المستمع (Listener) داخل دالة initializePlayer
                 addListener(object : Player.Listener {
+                    override fun onVideoSizeChanged(videoSize: VideoSize) {
+                        if (videoSize.width <= 0 || videoSize.height <= 0) return
+                        val videoRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
+                        val metrics = resources.displayMetrics
+                        val screenRatio = metrics.widthPixels.toFloat() / metrics.heightPixels.toFloat()
+                        val diff = kotlin.math.abs(videoRatio - screenRatio)
+                        playerView.resizeMode = if (diff > 0.35f)
+                            AspectRatioFrameLayout.RESIZE_MODE_FIT
+                        else
+                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                    }
+
                     override fun onPlayerError(error: PlaybackException) {
-                        handleRecovery()
+                        consecutiveErrors++
+                        logError("خطأ رقم $consecutiveErrors: ${error.message}")
+                        if (consecutiveErrors <= maxConsecutiveErrors) {
+                            handleRecovery()
+                        }
                     }
 
                     override fun onPlaybackStateChanged(state: Int) {
                         when (state) {
                             Player.STATE_READY -> {
-                                stallCounter = 0
+                                stopBufferingTimeout()
                                 startStallDetection()
+                                isRecovering = false
+                                recoveryAttempts = 0
+                                consecutiveErrors = 0 // تصفير الأخطاء عند العمل بنجاح
                             }
-
-                            Player.STATE_BUFFERING -> {
-                                playerView.postDelayed({
-                                    if (playbackState == Player.STATE_BUFFERING) handleRecovery()
-                                }, 30000)
-                            }
-
-                            Player.STATE_ENDED -> {
-                                if (!channelsList.isNullOrEmpty()) {
-                                    seekToDefaultPosition()
-                                    prepare()
-                                }
-                            }
+                            Player.STATE_BUFFERING -> startBufferingTimeout()
+                            Player.STATE_ENDED -> handleRecovery()
+                            else -> { /* حالات أخرى */ }
                         }
                     }
-                })
-            }
-    }
+                }) // نهاية الـ addListener
+            } // نهاية الـ apply
+    } // نهاية دالة initializePlayer بالكامل
 
-    private fun startStallDetection() {
-        stopStallDetection()
-        stallCounter = 0
-        stallCheckRunnable = Runnable {
-            val p = player ?: return@Runnable
-            if (p.isPlaying && p.playbackState == Player.STATE_READY) {
-                val currentPos = p.currentPosition
-                // التحقق من التوقف فقط للبث المباشر (التحقق من أن المسافة المتقدمة صغيرة جداً)
-                if (currentPos == lastPlaybackPosition && currentPos > 0) {
-                    stallCounter++
-                    // فقط بعد 3 توقفات متتالية نقوم ب Recovery
-                    if (stallCounter >= maxStallCount) {
-                        handleRecovery()
-                        return@Runnable
-                    }
-                } else {
-                    stallCounter = 0 // إعادة تعيين إذا تقدم التشغيل
+// --- الآن الدوال التالية تكون خارج initializePlayer ومستقلة بذاتها ---
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val p = player ?: return super.dispatchKeyEvent(event)
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    if (p.isPlaying) p.pause() else p.play()
+                    return true
                 }
-                lastPlaybackPosition = currentPos
-            }
-            playerView.postDelayed(stallCheckRunnable!!, stallCheckInterval)
-        }
-        playerView.postDelayed(stallCheckRunnable!!, stallCheckInterval)
-    }
-
-    private fun stopStallDetection() {
-        stallCheckRunnable?.let { playerView.removeCallbacks(it) }
-        stallCheckRunnable = null
-    }
-
-    private fun handleRecovery() {
-        if (isRecovering) return
-        isRecovering = true
-        stallCounter = 0
-
-        player?.let {
-            val currentMediaItem = it.currentMediaItem
-            val currentPos = it.currentPosition
-
-            try {
-                it.stop()
-                it.clearMediaItems()
-                if (currentMediaItem != null) {
-                    it.setMediaItem(currentMediaItem)
-                    // الانتظار قليلاً قبل استئناف التشغيل
-                    it.seekTo(currentPos)
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
+                    changeChannel(true)
+                    return true
                 }
-                it.prepare()
-                it.play()
-            } catch (e: Exception) {
-                e.printStackTrace()
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                    changeChannel(false)
+                    return true
+                }
+                KeyEvent.KEYCODE_BACK -> {
+                    finish()
+                    return true
+                }
             }
         }
-
-        // زيادة وقت انتظار الاستقرار من 3 إلى 5 ثوان
-        playerView.postDelayed({ isRecovering = false }, 5000)
-    }
-
-    private fun getOptimalResizeMode(): Int {
-        val displayMetrics = resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        val screenHeight = displayMetrics.heightPixels
-
-        // حساب نسبة العرض إلى الارتفاع للشاشة
-        val screenAspectRatio = screenWidth.toFloat() / screenHeight.toFloat()
-
-        // إذا كانت الشاشة بنسبة عريضة جداً (عرضية) أو مربعة تقريباً
-        return when {
-            screenAspectRatio > 1.5f || screenAspectRatio < 0.67f -> {
-                // للهواتف العريضة جداً أو الطويلة جداً: استخدم FILL
-                AspectRatioFrameLayout.RESIZE_MODE_FILL
-            }
-
-            screenWidth < 540 || screenHeight < 960 -> {
-                // للهواتف الصغيرة جداً: استخدم ZOOM قليل
-                AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-            }
-
-            else -> {
-                // للهواتف العادية والكبيرة: استخدم FIT للحفاظ على النسبة
-                AspectRatioFrameLayout.RESIZE_MODE_FIT
-            }
-        }
+        return super.dispatchKeyEvent(event)
     }
 
     private fun changeChannel(next: Boolean) {
         val list = channelsList ?: return
-        currentChannelIndex = if (next) (currentChannelIndex + 1) % list.size
-        else if (currentChannelIndex > 0) currentChannelIndex - 1 else list.size - 1
+        currentChannelIndex = if (next) (currentChannelIndex + 1) % list.size else if (currentChannelIndex > 0) currentChannelIndex - 1 else list.size - 1
         initializePlayer(list[currentChannelIndex])
     }
+
+    private fun startStallDetection() {
+        stopStallDetection()
+        stallCheckRunnable = Runnable {
+            player?.let {
+                if (it.isPlaying && it.currentPosition == lastPlaybackPosition && it.currentPosition > 0) {
+                    stallCounter++
+                    if (stallCounter >= maxStallCount) { handleRecovery(); return@Runnable }
+                } else stallCounter = 0
+                lastPlaybackPosition = it.currentPosition
+                playerView.postDelayed(stallCheckRunnable!!, stallCheckInterval)
+            }
+        }
+        playerView.postDelayed(stallCheckRunnable!!, stallCheckInterval)
+    }
+
+    private fun stopStallDetection() { stallCheckRunnable?.let { playerView.removeCallbacks(it) }; stallCounter = 0 }
+    private fun startBufferingTimeout() { stopBufferingTimeout(); bufferingTimeout = Runnable { handleRecovery() }; playerView.postDelayed(bufferingTimeout!!, bufferingTimeoutInterval) }
+    private fun stopBufferingTimeout() { bufferingTimeout?.let { playerView.removeCallbacks(it) } }
+
+    private fun handleRecovery() {
+        if (isRecovering) return
+        isRecovering = true
+
+        player?.let { p ->
+            val currentPos = p.currentPosition
+            val currentMediaItem = p.currentMediaItem
+
+            logError("إعادة إنعاش البث لتجنب التوقف...")
+
+            // نقوم بإيقاف المشغل تماماً وإعادة تهيئته
+            p.stop()
+            p.clearMediaItems()
+
+            if (currentMediaItem != null) {
+                p.setMediaItem(currentMediaItem)
+                // نعود للخلف قليلاً لضمان استمرارية التدفق من السيرفر
+                p.seekTo(if (currentPos > 1000) currentPos - 1000 else 0)
+            }
+
+            p.prepare()
+            p.play()
+
+            // نترك المشغل قليلاً قبل السماح بمحاولة استعادة أخرى
+            playerView.postDelayed({
+                isRecovering = false
+            }, 3000)
+        } ?: run {
+            isRecovering = false
+        }
+    }
+
+    // هذه الدالة يجب أن تكون خارج قوس handleRecovery
+    private fun logError(message: String) {
+        android.util.Log.e("PlayerActivity", message)
+    }
+
+    override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
 
     private fun applyImmersiveMode() {
         @Suppress("DEPRECATION")
@@ -316,74 +354,4 @@ class PlayerActivity : AppCompatActivity() {
                     View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
                     View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
     }
-
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            val p = player ?: return super.dispatchKeyEvent(event)
-
-            when (event.keyCode) {
-                // زر OK أو Enter للإيقاف والتشغيل
-                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                    if (p.isPlaying) {
-                        p.pause()
-                    } else {
-                        p.play()
-                    }
-                    return true
-                }
-
-                // زر الأعلى والأسفل لتغيير القنوات
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
-                    changeChannel(true); return true
-                }
-
-                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
-                    changeChannel(false); return true
-                }
-
-                // زر اليمين: تقديم 10 ثوانٍ
-                KeyEvent.KEYCODE_DPAD_RIGHT -> {
-                    if (p.isCurrentMediaItemSeekable) {
-                        p.seekTo(minOf(p.currentPosition + 10000, p.duration))
-                    }
-                    return true
-                }
-
-                // زر اليسار: تأخير 10 ثوانٍ
-                KeyEvent.KEYCODE_DPAD_LEFT -> {
-                    if (p.isCurrentMediaItemSeekable) {
-                        p.seekTo(maxOf(0, p.currentPosition - 10000))
-                    }
-                    return true
-                }
-
-                KeyEvent.KEYCODE_BACK -> {
-                    finish(); return true
-                }
-            }
-        }
-        return super.dispatchKeyEvent(event)
-    }
-
-    override fun onResume() {
-        super.onResume()
-        applyImmersiveMode()
-        player?.play()
-        startStallDetection()
-    }
-
-    override fun onPause() {
-        super.onPause()
-        player?.pause()
-        stopStallDetection()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        stopStallDetection()
-        player?.stop()
-        player?.release()
-        player = null
-    }
-
 }
