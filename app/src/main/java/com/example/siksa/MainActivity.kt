@@ -39,6 +39,8 @@ import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URL
+import android.util.Base64
+import org.json.JSONObject
 import com.example.siksa.PlayerActivity
 import kotlinx.parcelize.Parcelize
 import android.os.Parcelable
@@ -102,18 +104,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun getExternalM3uUrl(): String? {
         return when {
+            // إذا جاء Intent من خارج التطبيق (رابط مباشر)
             intent?.action == Intent.ACTION_VIEW && intent.data != null -> {
                 val url = intent.data.toString()
-                if (url.endsWith(".m3u") || url.endsWith(".m3u8") || url.contains("m3u")) {
+                if (url.endsWith(".m3u") || url.endsWith(".m3u8") || url.endsWith(".json") || url.contains("m3u")) {
                     url
                 } else null
             }
+            // إذا أرسلنا رابط M3U أو JSON من MainActivity أو أي Activity أخرى
             intent?.hasExtra("m3u_url") == true -> {
                 intent.getStringExtra("m3u_url")
             }
+            // إذا أرسلنا رابط الباقة مباشرة عبر streamUrl
             intent?.hasExtra("streamUrl") == true -> {
                 val url = intent.getStringExtra("streamUrl")
-                if (url?.endsWith(".m3u") == true || url?.endsWith(".m3u8") == true) {
+                if (url?.endsWith(".m3u") == true || url?.endsWith(".m3u8") == true || url?.endsWith(".json") == true) {
                     url
                 } else null
             }
@@ -281,20 +286,21 @@ fun ChannelListScreen(
                             .clickable {
                                 onChannelClick(actualIndex)
 
-                                if (isVideoStream(channel.url)) {
-                                    // تجهيز قائمة الروابط فقط لإرسالها للمشغل
+                                val realUrl = decodeBase64Url(channel.url) // 👈 فك الرابط هنا
+
+                                if (isVideoStream(realUrl)) {
                                     val allUrls = ArrayList<String>()
-                                    channels.forEach { allUrls.add(it.url) }
+                                    channels.forEach { allUrls.add(decodeBase64Url(it.url)) } // فك جميع الروابط
 
                                     val intent = Intent(context, PlayerActivity::class.java).apply {
-                                        putExtra("streamUrl", channel.url) // الرابط الحالي
-                                        putExtra("channelIndex", actualIndex) // ترتيبه
-                                        putStringArrayListExtra("channelsList", allUrls) // كل الروابط للتبديل
+                                        putExtra("streamUrl", realUrl) // الرابط المفكوك
+                                        putExtra("channelIndex", actualIndex)
+                                        putStringArrayListExtra("channelsList", allUrls)
                                     }
                                     context.startActivity(intent)
                                 } else {
                                     val intent = Intent(context, WebViewActivity::class.java).apply {
-                                        putExtra("url", channel.url)
+                                        putExtra("url", realUrl)
                                     }
                                     context.startActivity(intent)
                                 }
@@ -375,82 +381,95 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
 suspend fun loadChannels(url: String): List<Channel> {
     return withContext(Dispatchers.IO) {
         try {
-            val client = OkHttpClient()
-            val request = Request.Builder()
-                .url(url)
-                .header("User-Agent", "Mozilla/5.0")
-                .header("Accept", "*/*")
-                .header("Connection", "keep-alive")
-                .build()
-            val response = client.newCall(request).execute()
-            val content = response.body?.string() ?: ""
+            val realUrl = if (url.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
+                // يبدو مشفر Base64
+                try { String(Base64.decode(url, Base64.DEFAULT)) } catch (_: Exception) { url }
+            } else url
 
-            if (url.endsWith(".json") || content.trim().startsWith("[")) {
+            val client = OkHttpClient()
+            val request = Request.Builder().url(realUrl).header("User-Agent", "Mozilla/5.0").build()
+            val response = client.newCall(request).execute()
+            val content = response.body?.string()?.trim() ?: ""
+
+            // JSON مع Array فقط
+            if (content.startsWith("[")) {
                 val jsonArray = JSONArray(content)
                 val channels = mutableListOf<Channel>()
-
                 for (i in 0 until jsonArray.length()) {
                     val item = jsonArray.getJSONObject(i)
-
-                    val name = item.optString("name")
-                    val streamUrl = item.optString("url")
-                    val logo = item.optString("logo")
-
-                    var drmLicense = ""
-
-                    val drmObject = item.optJSONObject("drm")
-                    if (drmObject != null) {
-                        val scheme = drmObject.optString("scheme", "")
-                        val kid = drmObject.optString("kid", "")
-                        val key = drmObject.optString("key", "")
-                        if (scheme.isNotEmpty() && kid.isNotEmpty() && key.isNotEmpty()) {
-                            drmLicense = "$scheme:$kid:$key"
-                        }
-                    }
-
-                    val licenseType = item.optString("license_type", "")
-                    val licenseKey = item.optString("license_key", "")
-                    if (licenseType.isNotEmpty() && licenseKey.isNotEmpty()) {
-                        drmLicense = "$licenseType:$licenseKey"
-                    }
-
-                    channels.add(Channel(name, streamUrl, logo, drmLicense))
+                    channels.add(Channel(
+                        name = item.optString("name"),
+                        url = item.optString("url"),
+                        logo = item.optString("logo"),
+                        drmLicense = item.optString("key")
+                    ))
                 }
-                channels
-            } else {
-                val lines = content.lines()
-                val channels = mutableListOf<Channel>()
-                var name = ""
-                var logo = ""
-                var group = ""
-
-                for (i in lines.indices) {
-                    val line = lines[i].trim()
-                    if (line.startsWith("#EXTINF")) {
-                        name = line.substringAfter(",").trim()
-                        logo = Regex("""tvg-logo="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
-                        group = Regex("""group-title="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
-                    } else if (line.startsWith("http") && line.isNotEmpty()) {
-                        channels.add(
-                            Channel(
-                                name = name.ifEmpty { "Channel ${channels.size + 1}" },
-                                url = line,
-                                logo = logo,
-                                drmLicense = "",
-                                group = group
-                            )
-                        )
-                        name = ""
-                        logo = ""
-                        group = ""
-                    }
-                }
-                channels
+                return@withContext channels
             }
+
+            // JSON مع مجموعات
+            if (content.startsWith("{")) {
+                val jsonObj = JSONObject(content)
+                val channels = mutableListOf<Channel>()
+                jsonObj.keys().forEach { group ->
+                    val array = jsonObj.getJSONArray(group)
+                    for (i in 0 until array.length()) {
+                        val item = array.getJSONObject(i)
+                        channels.add(Channel(
+                            name = item.optString("name"),
+                            url = item.optString("url"),
+                            logo = item.optString("logo"),
+                            drmLicense = item.optString("key"),
+                            group = group
+                        ))
+                    }
+                }
+                return@withContext channels
+            }
+
+            // M3U التقليدي
+            val lines = content.lines()
+            val channels = mutableListOf<Channel>()
+            var name = ""
+            var logo = ""
+            var group = ""
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.startsWith("#EXTINF")) {
+                    name = trimmed.substringAfter(",").trim()
+                    logo = Regex("""tvg-logo="(.*?)"""").find(trimmed)?.groupValues?.get(1) ?: ""
+                    group = Regex("""group-title="(.*?)"""").find(trimmed)?.groupValues?.get(1) ?: ""
+                } else if (trimmed.startsWith("http")) {
+                    channels.add(Channel(
+                        name = name.ifEmpty { "Channel ${channels.size + 1}" },
+                        url = trimmed,
+                        logo = logo,
+                        drmLicense = "",
+                        group = group
+                    ))
+                    name = ""
+                    logo = ""
+                    group = ""
+                }
+            }
+            channels
+
         } catch (e: Exception) {
             e.printStackTrace()
             emptyList()
         }
+    }
+}
+fun decodeBase64Url(url: String): String {
+    return try {
+        // إذا كان url يبدو مشفر Base64
+        if (url.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
+            String(android.util.Base64.decode(url, android.util.Base64.DEFAULT))
+        } else {
+            url
+        }
+    } catch (e: Exception) {
+        url
     }
 }
 
@@ -531,5 +550,3 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
 
     return false
 }
-
-
