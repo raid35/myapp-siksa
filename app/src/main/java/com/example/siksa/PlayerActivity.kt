@@ -132,7 +132,6 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun initializePlayer(inputUrl: String) {
-        // 1. تنظيف وإيقاف أي مشغل قديم
         stopStallDetection()
         stopBufferingTimeout()
         player?.release()
@@ -141,11 +140,23 @@ class PlayerActivity : AppCompatActivity() {
         consecutiveErrors = 0
 
         // 2. تحليل الرابط واستخراج البيانات
+        // 2. تحليل الرابط واستخراج البيانات
         val fullPath = inputUrl.trim().split("\n").find { it.startsWith("http") } ?: return
+        android.util.Log.e("DEBUG_FULLPATH", fullPath)
+
         val parts = fullPath.split("|")
         val url = parts[0].trim()
-        val drmLicense = if (parts.size > 1) parts[1].substringAfter("drmLicense=", "").substringBefore("&") else ""
 
+// 👈 إضافة تعريف المتغيرات الخاصة بالـ DRM
+        var drmType = ""
+        var drmKey = ""
+        if (parts.size > 1) {
+            val drmParts = parts.subList(1, parts.size)
+            drmParts.forEach { part ->
+                if (part.startsWith("drm-info=")) drmType = part.substringAfter("drm-info=")
+                else drmKey = part
+            }
+        }
         // 3. إعداد محدد المسارات (صوت وترجمة)
         val trackSelector = DefaultTrackSelector(this).apply {
             setParameters(
@@ -186,8 +197,8 @@ class PlayerActivity : AppCompatActivity() {
         // 6. بناء MediaItem مع دعم DRM ونوع الملف
         val mediaItemBuilder = MediaItem.Builder().setUri(url)
 
-        if (drmLicense.contains(":")) {
-            val (kid, key) = drmLicense.split(":")
+        if (drmType.equals("clearkey", ignoreCase = true) && drmKey.contains(":")) {
+            val (kid, key) = drmKey.split(":")
             val json = """{"keys":[{"kty":"oct","k":"$key","kid":"$kid"}],"type":"temporary"}"""
             val base64 = android.util.Base64.encodeToString(json.toByteArray(), android.util.Base64.NO_WRAP)
             mediaItemBuilder.setDrmConfiguration(
