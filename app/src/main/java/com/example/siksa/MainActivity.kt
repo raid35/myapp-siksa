@@ -44,6 +44,12 @@ import org.json.JSONObject
 import com.example.siksa.PlayerActivity
 import kotlinx.parcelize.Parcelize
 import android.os.Parcelable
+import okhttp3.Response
+import coil.ImageLoader
+import coil.compose.AsyncImage
+import coil.decode.SvgDecoder
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -76,6 +82,7 @@ class MainActivity : AppCompatActivity() {
                             onBack = { finish() }
                         )
                     }
+
                     selectedPackageUrl == null -> {
                         PackageListScreen(
                             selectedIndex = selectedIndex,
@@ -86,6 +93,7 @@ class MainActivity : AppCompatActivity() {
                             }
                         )
                     }
+
                     else -> {
                         ChannelListScreen(
                             m3uUrl = selectedPackageUrl!!,
@@ -103,33 +111,40 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getExternalM3uUrl(): String? {
+        val action = intent?.action
+        val data = intent?.data
+        val mimeType = intent?.type
+
         return when {
-            // إذا جاء Intent من خارج التطبيق (رابط مباشر)
-            intent?.action == Intent.ACTION_VIEW && intent.data != null -> {
-                val url = intent.data.toString()
-                if (url.endsWith(".m3u") || url.endsWith(".m3u8") || url.endsWith(".json") || url.contains("m3u")) {
+            // حالة استقبال رابط مباشر أو ملف من مدير الملفات
+            action == Intent.ACTION_VIEW && data != null -> {
+                val url = data.toString()
+                // فحص النوع بناءً على الملحق أو النوع البرمجي (MIME Type)
+                if (url.endsWith(".m3u") || url.endsWith(".m3u8") || url.endsWith(".json") ||
+                    url.contains("m3u") || mimeType?.contains("mpegurl") == true ||
+                    mimeType?.contains("video/") == true || mimeType?.contains("application/octet-stream") == true
+                ) {
                     url
-                } else null
+                } else {
+                    url // نمرر الرابط على أي حال ليحاول التطبيق تشغيله
+                }
             }
-            // إذا أرسلنا رابط M3U أو JSON من MainActivity أو أي Activity أخرى
-            intent?.hasExtra("m3u_url") == true -> {
-                intent.getStringExtra("m3u_url")
-            }
-            // إذا أرسلنا رابط الباقة مباشرة عبر streamUrl
-            intent?.hasExtra("streamUrl") == true -> {
-                val url = intent.getStringExtra("streamUrl")
-                if (url?.endsWith(".m3u") == true || url?.endsWith(".m3u8") == true || url?.endsWith(".json") == true) {
-                    url
-                } else null
-            }
+            // الروابط المرسلة من داخل التطبيق عبر Extras
+            intent?.hasExtra("m3u_url") == true -> intent.getStringExtra("m3u_url")
+            intent?.hasExtra("streamUrl") == true -> intent.getStringExtra("streamUrl")
             else -> null
         }
     }
 
+    // تحديث التعامل مع الأوامر الجديدة عند إعادة تشغيل النشاط
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        recreate()
+        // فحص الرابط الجديد، إذا وجد نقوم بتحديث الحالة
+        val newUrl = getExternalM3uUrl()
+        if (newUrl != null) {
+            recreate() // إعادة تشغيل الواجهة لتحميل الرابط الجديد
+        }
     }
 }
 
@@ -140,10 +155,18 @@ fun PackageListScreen(
 ) {
     var packages by remember { mutableStateOf(listOf<PackageItem>()) }
     val listState = rememberLazyListState()
+    val context = LocalContext.current
+
+    val imageLoader = remember {
+        ImageLoader.Builder(context)
+            .components { add(SvgDecoder.Factory()) }
+            .allowHardware(false)
+            .crossfade(true)
+            .build()
+    }
 
     LaunchedEffect(Unit) {
         packages = loadPackagesFromM3u("https://raw.githubusercontent.com/raid35/channel-links/main/siksa_tv.m3u")
-
         selectedIndex?.let {
             val rowIndex = it / 5
             listState.scrollToItem(rowIndex)
@@ -154,15 +177,13 @@ fun PackageListScreen(
 
     LazyColumn(
         state = listState,
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+        modifier = Modifier.fillMaxSize().padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         itemsIndexed(rows) { rowIndex, rowItems ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 rowItems.forEachIndexed { itemIndex, pkg ->
                     val actualIndex = rowIndex * 5 + itemIndex
@@ -182,55 +203,43 @@ fun PackageListScreen(
                             .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
                             .border(
-                                width = if (isFocused) 2.dp else 0.dp,
-                                color = if (isFocused) Color.White else Color.Transparent,
+                                width = if (isFocused) 3.dp else 1.dp, // إطار خفيف جداً في الحالة العادية
+                                color = if (isFocused) Color.Yellow else Color.White.copy(alpha = 0.1f),
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .focusable()
-                            .clickable {
-                                onPackageClick(actualIndex, pkg.url)
-                            },
+                            .clickable { onPackageClick(actualIndex, pkg.url) },
                         shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.1f)),
-                        elevation = CardDefaults.cardElevation(4.dp)
+                        // خلفية داكنة خفيفة تجعل الشعارات الملونة تبرز بشكل أجمل
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.Black.copy(alpha = 0.2f)
+                        )
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                            modifier = Modifier.padding(8.dp)
+                        Box(
+                            modifier = Modifier.fillMaxSize().padding(8.dp), // Padding لمنع التصاق الشعار بالإطار
+                            contentAlignment = Alignment.Center
                         ) {
-                            Image(
-                                painter = rememberAsyncImagePainter(
-                                    model = ImageRequest.Builder(LocalContext.current)
-                                        .data(pkg.logo)
-                                        .setHeader("User-Agent", "Mozilla/5.0")
-                                        .crossfade(true)
-                                        .build()
-                                ),
+                            AsyncImage(
+                                model = ImageRequest.Builder(context)
+                                    .data(pkg.logo)
+                                    .setHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                                    .build(),
+                                imageLoader = imageLoader,
                                 contentDescription = null,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(170.dp)
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                pkg.name,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color.White,
-                                textAlign = TextAlign.Center
+                                // Fit يحافظ على أبعاد الشعار الأصلية ويجعله داخل الإطار بشكل جميل
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier.fillMaxSize(),
+                                error = painterResource(id = android.R.drawable.ic_menu_gallery),
+                                placeholder = painterResource(id = android.R.drawable.ic_menu_gallery)
                             )
                         }
                     }
                 }
-
-                repeat(5 - rowItems.size) {
-                    Spacer(modifier = Modifier.weight(1f))
-                }
+                repeat(5 - rowItems.size) { Spacer(modifier = Modifier.weight(1f)) }
             }
         }
     }
 }
-
 @Composable
 fun ChannelListScreen(
     m3uUrl: String,
@@ -247,7 +256,8 @@ fun ChannelListScreen(
         channels = loadChannels(m3uUrl)
     }
 
-    val rows = channels.chunked(7)
+    // 1. تغيير التقسيم إلى 6 بدل 7
+    val rows = channels.chunked(6)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -261,7 +271,8 @@ fun ChannelListScreen(
                     .padding(horizontal = 8.dp)
             ) {
                 itemsIndexed(rowChannels) { itemIndex, channel ->
-                    val actualIndex = rowIndex * 7 + itemIndex
+                    // 2. تحديث معادلة الاندكس لتعتمد على 6
+                    val actualIndex = rowIndex * 6 + itemIndex
                     var isFocused by remember { mutableStateOf(false) }
                     val focusRequester = remember(channel.url) { FocusRequester() }
 
@@ -274,28 +285,36 @@ fun ChannelListScreen(
 
                     Card(
                         modifier = Modifier
-                            .width(120.dp)
+                            // 3. تعديل العرض ليناسب 6 إطارات (150dp إلى 160dp عادة ما تكون مثالية لـ 6)
+                            .width(155.dp)
+                            .height(170.dp)
                             .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
                             .border(
                                 width = if (isFocused) 2.dp else 0.dp,
                                 color = if (isFocused) Color.White else Color.Transparent,
-                                shape = RoundedCornerShape(16.dp)
+                                shape = RoundedCornerShape(12.dp)
                             )
                             .focusable()
                             .clickable {
                                 onChannelClick(actualIndex)
-
-                                val realUrl = decodeBase64Url(channel.url) // 👈 فك الرابط هنا
-
+                                // ... كود التشغيل الخاص بك كما هو بدون تغيير ...
+                                val allUrls = ArrayList<String>()
+                                channels.forEach { ch ->
+                                    val decodedUrl = decodeBase64Url(ch.url)
+                                    val formattedUrl = if (ch.drmLicense.isNotEmpty()) "$decodedUrl|${ch.drmLicense}" else decodedUrl
+                                    allUrls.add(formattedUrl)
+                                }
+                                val currentChannel = channels[actualIndex]
+                                val realUrl = decodeBase64Url(currentChannel.url)
                                 if (isVideoStream(realUrl)) {
-                                    val allUrls = ArrayList<String>()
-                                    channels.forEach { allUrls.add(decodeBase64Url(it.url)) } // فك جميع الروابط
-
                                     val intent = Intent(context, PlayerActivity::class.java).apply {
-                                        putExtra("streamUrl", realUrl) // الرابط المفكوك
-                                        putExtra("channelIndex", actualIndex)
                                         putStringArrayListExtra("channelsList", allUrls)
+                                        putExtra("channelIndex", actualIndex)
+                                        putExtra("streamUrl", realUrl)
+                                        putExtra("drmLicense", currentChannel.drmLicense)
+                                        putExtra("referer", currentChannel.referer)
+                                        putExtra("userAgent", currentChannel.userAgent)
                                     }
                                     context.startActivity(intent)
                                 } else {
@@ -305,14 +324,13 @@ fun ChannelListScreen(
                                     context.startActivity(intent)
                                 }
                             },
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.1f)),
-                        elevation = CardDefaults.cardElevation(6.dp)
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.White.copy(alpha = 0.1f)
+                        ),
+                        elevation = CardDefaults.cardElevation(4.dp)
                     ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.padding(12.dp)
-                        ) {
+                        Box(modifier = Modifier.fillMaxSize()) {
                             Image(
                                 painter = rememberAsyncImagePainter(
                                     model = ImageRequest.Builder(LocalContext.current)
@@ -322,17 +340,27 @@ fun ChannelListScreen(
                                         .build()
                                 ),
                                 contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = androidx.compose.ui.layout.ContentScale.FillBounds
+                            )
+
+                            Surface(
                                 modifier = Modifier
-                                    .size(100.dp)
-                                    .padding(bottom = 6.dp)
-                            )
-                            Text(
-                                text = channel.name,
-                                textAlign = TextAlign.Center,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = Color.White,
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                                    .align(Alignment.BottomCenter)
+                                    .fillMaxWidth(),
+                                color = Color.Black.copy(alpha = 0.5f)
+                            ) {
+                                Text(
+                                    text = channel.name,
+                                    textAlign = TextAlign.Center,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color.White,
+                                    modifier = Modifier
+                                        .padding(4.dp)
+                                        .fillMaxWidth(),
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                 }
@@ -340,18 +368,20 @@ fun ChannelListScreen(
         }
     }
 }
-
+// تأكد أن هذه الدالة موجودة في أسفل الملف ومستوردة بشكل صحيح
 suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
     return withContext(Dispatchers.IO) {
         try {
             val client = OkHttpClient()
+            // استخدام User-Agent موحد كما في دالة القنوات
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", "Mozilla/5.0")
-                .header("Accept", "*/*")
-                .header("Connection", "keep-alive")
                 .build()
+
             val response = client.newCall(request).execute()
+            if (!response.isSuccessful) return@withContext emptyList()
+
             val content = response.body?.string() ?: ""
             val lines = content.lines()
 
@@ -359,13 +389,24 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
             var name = ""
             var logo = ""
 
-            for (i in lines.indices) {
-                val line = lines[i].trim()
-                if (line.startsWith("#EXTINF")) {
-                    name = line.substringAfter(",").trim()
-                    logo = Regex("""tvg-logo="(.*?)"""").find(line)?.groupValues?.get(1) ?: ""
-                } else if (line.startsWith("http") && line.isNotEmpty()) {
-                    packages.add(PackageItem(name.ifEmpty { "Channel ${packages.size + 1}" }, logo, line))
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+
+                if (trimmed.startsWith("#EXTINF")) {
+                    // استخراج الاسم بعد الفاصلة الأخيرة (نفس منطق دالة القنوات)
+                    name = trimmed.substringAfterLast(",").trim()
+
+                    // استخراج اللوجو مع إضافة .trim() لضمان حذف المسافات الزائدة التي لاحظناها في ملفك
+                    logo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1)?.trim() ?: ""
+
+                } else if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
+                    // إضافة الباقة وتصفير المتغيرات للدورة القادمة
+                    packages.add(PackageItem(
+                        name = name.ifEmpty { "Package ${packages.size + 1}" },
+                        logo = logo,
+                        url = trimmed
+                    ))
                     name = ""
                     logo = ""
                 }
@@ -377,83 +418,100 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
         }
     }
 }
-
 suspend fun loadChannels(url: String): List<Channel> {
     return withContext(Dispatchers.IO) {
         try {
+            val client = OkHttpClient()
+
+            // فك تشفير رابط ملف الـ M3U/JSON إذا كان Base64
             val realUrl = if (url.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
-                // يبدو مشفر Base64
-                try { String(Base64.decode(url, Base64.DEFAULT)) } catch (_: Exception) { url }
+                try { String(android.util.Base64.decode(url, android.util.Base64.DEFAULT)) } catch (_: Exception) { url }
             } else url
 
-            val client = OkHttpClient()
-            val request = Request.Builder().url(realUrl).header("User-Agent", "Mozilla/5.0").build()
-            val response = client.newCall(request).execute()
-            val content = response.body?.string()?.trim() ?: ""
+            val request = Request.Builder()
+                .url(realUrl)
+                .header("User-Agent", "Mozilla/5.0")
+                .build()
 
-            // JSON مع Array فقط
-            if (content.startsWith("[")) {
-                val jsonArray = JSONArray(content)
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext emptyList()
+
+                val content = response.body?.string()?.trim() ?: ""
                 val channels = mutableListOf<Channel>()
-                for (i in 0 until jsonArray.length()) {
-                    val item = jsonArray.getJSONObject(i)
-                    channels.add(Channel(
-                        name = item.optString("name"),
-                        url = item.optString("url"),
-                        logo = item.optString("logo"),
-                        drmLicense = item.optString("key")
-                    ))
+
+                // --- الحالة الأولى: إذا كان الملف بصيغة JSON ---
+                if (content.startsWith("[") || content.startsWith("{")) {
+                    try {
+                        val jsonArray = if (content.startsWith("{")) {
+                            // إذا كان الكائن JSON يحتوي على مصفوفة بداخله (مثلاً تحت مفتاح "channels")
+                            org.json.JSONObject(content).getJSONArray("channels")
+                        } else {
+                            org.json.JSONArray(content)
+                        }
+
+                        for (i in 0 until jsonArray.length()) {
+                            val obj = jsonArray.getJSONObject(i)
+                            channels.add(Channel(
+                                name = obj.optString("name", "Unknown"),
+                                url = obj.optString("url", ""),
+                                logo = obj.optString("logo", ""),
+                                drmLicense = obj.optString("drmLicense", ""),
+                                referer = obj.optString("referer", ""),
+                                userAgent = obj.optString("userAgent", ""),
+                                group = obj.optString("group", "")
+                            ))
+                        }
+                        return@withContext channels
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        // إذا فشل تحليل JSON، نترك الكود يكمل لربما يكون M3U بطريقة ما
+                    }
                 }
-                return@withContext channels
-            }
 
-            // JSON مع مجموعات
-            if (content.startsWith("{")) {
-                val jsonObj = JSONObject(content)
-                val channels = mutableListOf<Channel>()
-                jsonObj.keys().forEach { group ->
-                    val array = jsonObj.getJSONArray(group)
-                    for (i in 0 until array.length()) {
-                        val item = array.getJSONObject(i)
-                        channels.add(Channel(
-                            name = item.optString("name"),
-                            url = item.optString("url"),
-                            logo = item.optString("logo"),
-                            drmLicense = item.optString("key"),
-                            group = group
-                        ))
+                // --- الحالة الثانية: إذا كان الملف بصيغة M3U (الكود القديم الخاص بك) ---
+                val lines = content.lines()
+                var name = ""
+                var logo = ""
+                var group = ""
+                var currentReferer = ""
+                var currentUserAgent = ""
+                var currentClearKey = ""
+
+                for (line in lines) {
+                    val trimmed = line.trim()
+                    if (trimmed.isEmpty()) continue
+
+                    when {
+                        trimmed.startsWith("#EXTINF") -> {
+                            name = trimmed.substringAfter(",").trim()
+                            logo = Regex("""tvg-logo="(.*?)"""").find(trimmed)?.groupValues?.get(1) ?: ""
+                            group = Regex("""group-title="(.*?)"""").find(trimmed)?.groupValues?.get(1) ?: ""
+                        }
+                        trimmed.startsWith("#EXTVLCOPT:http-referrer=") -> {
+                            currentReferer = trimmed.substringAfter("=").trim()
+                        }
+                        trimmed.startsWith("#EXTVLCOPT:http-user-agent=") -> {
+                            currentUserAgent = trimmed.substringAfter("=").trim()
+                        }
+                        trimmed.startsWith("#KODIPROP:inputstream.adaptive.license_key=") -> {
+                            currentClearKey = trimmed.substringAfter("=").trim()
+                        }
+                        !trimmed.startsWith("#") -> {
+                            channels.add(Channel(
+                                name = name.ifEmpty { "Channel ${channels.size + 1}" },
+                                url = trimmed,
+                                logo = logo,
+                                drmLicense = currentClearKey,
+                                referer = currentReferer,
+                                userAgent = currentUserAgent,
+                                group = group
+                            ))
+                            name = ""; logo = ""; group = ""; currentReferer = ""; currentUserAgent = ""; currentClearKey = ""
+                        }
                     }
                 }
                 return@withContext channels
             }
-
-            // M3U التقليدي
-            val lines = content.lines()
-            val channels = mutableListOf<Channel>()
-            var name = ""
-            var logo = ""
-            var group = ""
-            for (line in lines) {
-                val trimmed = line.trim()
-                if (trimmed.startsWith("#EXTINF")) {
-                    name = trimmed.substringAfter(",").trim()
-                    logo = Regex("""tvg-logo="(.*?)"""").find(trimmed)?.groupValues?.get(1) ?: ""
-                    group = Regex("""group-title="(.*?)"""").find(trimmed)?.groupValues?.get(1) ?: ""
-                } else if (trimmed.startsWith("http")) {
-                    channels.add(Channel(
-                        name = name.ifEmpty { "Channel ${channels.size + 1}" },
-                        url = trimmed,
-                        logo = logo,
-                        drmLicense = "",
-                        group = group
-                    ))
-                    name = ""
-                    logo = ""
-                    group = ""
-                }
-            }
-            channels
-
         } catch (e: Exception) {
             e.printStackTrace()
             emptyList()
@@ -462,17 +520,17 @@ suspend fun loadChannels(url: String): List<Channel> {
 }
 fun decodeBase64Url(url: String): String {
     return try {
-        // إذا كان url يبدو مشفر Base64
-        if (url.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
-            String(android.util.Base64.decode(url, android.util.Base64.DEFAULT))
+        // نتحقق إذا كان الرابط فعلاً Base64 (لا يبدأ بـ http ويحتوي رموز التشفير)
+        if (!url.startsWith("http") && url.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
+            val data = android.util.Base64.decode(url, android.util.Base64.DEFAULT)
+            String(data, Charsets.UTF_8)
         } else {
             url
         }
     } catch (e: Exception) {
-        url
+        url // في حال الفشل نرجع الرابط الأصلي
     }
 }
-
 fun isMacPortalUrl(url: String): Boolean {
     val lowerUrl = url.lowercase()
     return (lowerUrl.contains("mac=") && lowerUrl.contains("stream=")) ||
@@ -493,7 +551,7 @@ fun isXtreamCodesUrl(url: String): Boolean {
 }
 
 fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
-    val lowerUrl = url.lowercase()
+    val lowerUrl = url.lowercase().trim() // أضفنا trim هنا لضمان دقة الفحص
 
     val videoExtensions = listOf(
         "m3u", "m3u8", "ts", "mpd", "ism", "isml", "f4m",
@@ -509,12 +567,18 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
 
     val streamProtocols = listOf("rtmp://", "rtsp://", "udp://")
 
+    // --- الإضافة الجديدة لروابط Xtream والروابط الرقمية ---
+    // هذا النمط يكتشف الروابط التي تنتهي بـ /رقم (مثل الرابط الخاص بك)
+    val isXtreamPattern = Regex(".*/[0-9]+$").matches(lowerUrl)
+    if (isXtreamPattern) return true
+    // ---------------------------------------------------
+
     // التحقق من البروتوكولات الخاصة بالبث
     if (streamProtocols.any { lowerUrl.startsWith(it) }) return true
 
     // التحقق من الامتدادات
     try {
-        val uri = URI(lowerUrl)
+        val uri = java.net.URI(lowerUrl)
         val allParts = listOfNotNull(uri.path, uri.query, uri.fragment)
 
         if (allParts.any { part ->
@@ -531,16 +595,16 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
     // التحقق من نوع المحتوى من خلال الهيدر إذا طُلب ذلك
     if (checkHeader) {
         try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
             connection.requestMethod = "HEAD"
             connection.connectTimeout = 3000
             connection.readTimeout = 3000
             connection.instanceFollowRedirects = true
 
             val contentType = connection.contentType?.lowercase() ?: ""
-            if (contentType.startsWith("video") ||
-                contentType.contains("application/vnd.apple.mpegurl") ||  // HLS
-                contentType.contains("application/dash+xml") ||          // DASH
+            if (contentType.startsWith("video/") ||
+                contentType.contains("application/vnd.apple.mpegurl") ||
+                contentType.contains("application/dash+xml") ||
                 contentType.contains("application/x-mpegurl")
             ) {
                 return true
