@@ -24,7 +24,19 @@ import okhttp3.OkHttpClient
 import java.security.cert.X509Certificate
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+import androidx.core.graphics.toColorInt
+import android.annotation.SuppressLint
 import javax.net.ssl.*
+import android.util.Base64
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import android.content.Intent
+import androidx.media3.common.util.Util
+import androidx.core.net.toUri
+import androidx.media3.ui.CaptionStyleCompat
+import android.util.TypedValue
+import androidx.media3.exoplayer.DefaultRenderersFactory
+
+
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -33,50 +45,38 @@ class PlayerActivity : AppCompatActivity() {
     private lateinit var playerView: PlayerView
     private var channelsList: ArrayList<String>? = null
     private var currentChannelIndex = 0
-    private var isRecovering = false
-    private var lastPlaybackPosition = 0L
-
-    // --- التعديلات هنا ---
-
-    // فحص التعطل كل 2 ثانية بدل 3 لسرعة الاستجابة
-    private var stallCheckRunnable: Runnable? = null
-    private val stallCheckInterval = 2000L
-
-    // إذا توقف العداد مرتين (4 ثوانٍ ثبات) نعتبر البث متوقفاً
-    private var stallCounter = 0
-    private val maxStallCount = 2
-
-    // زيادة عدد محاولات الاستعادة لأن روابط IPTV كثيرة الانقطاع
-    private var recoveryAttempts = 0
-    private val maxRecoveryAttempts = 20
-
-    private var lastErrorTime = 0L
-    private val minErrorInterval = 1000L // تقليل الفاصل الزمني بين الأخطاء
     private var consecutiveErrors = 0
-    private val maxConsecutiveErrors = 10
-
-    // تقليل مهلة التحميل (Buffering) لـ 10 ثوانٍ
-    // إذا بقي يحمل أكثر من ذلك، يقوم بإعادة الاتصال فوراً
-    private var bufferingTimeout: Runnable? = null
-    private val bufferingTimeoutInterval = 10000L
-
-    // ----------------------
+    private val maxConsecutiveErrors = 5
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        applyImmersiveMode()
 
+        applyImmersiveMode()
+        setupUI()
+
+        channelsList = intent.getStringArrayListExtra("channelsList")
+        currentChannelIndex = intent.getIntExtra("channelIndex", 0)
+
+        loadChannelData()
+    }
+    private fun setupUI() {
         val rootLayout = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             setBackgroundColor(Color.BLACK)
         }
 
         playerView = PlayerView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
+
             setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             useController = false
-            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL // التعبئة الكاملة
+            keepScreenOn = true
         }
         rootLayout.addView(playerView)
 
@@ -88,7 +88,7 @@ class PlayerActivity : AppCompatActivity() {
             alpha = 0.3f
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.parseColor("#22000000"))
+                setColor("#22000000".toColorInt())
                 setStroke(1, Color.WHITE)
             }
             val size = (35 * resources.displayMetrics.density).toInt()
@@ -98,265 +98,293 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
         rootLayout.addView(watermark)
-
         setContentView(rootLayout)
+    }
 
+    // 1. تصحيح دالة استقبال الروابط الجديدة أثناء فتح التطبيق
+    override fun onNewIntent(intent: Intent) { // تأكد أن Intent هنا مستوردة
+        super.onNewIntent(intent)
+        setIntent(intent)
+
+        // استلام البيانات مع التأكد من القيم الافتراضية
         channelsList = intent.getStringArrayListExtra("channelsList")
         currentChannelIndex = intent.getIntExtra("channelIndex", 0)
-        val singleUrl = intent.getStringExtra("streamUrl")
 
-        when {
-            !channelsList.isNullOrEmpty() -> initializePlayer(channelsList!![currentChannelIndex])
-            !singleUrl.isNullOrEmpty() -> initializePlayer(singleUrl)
-        }
+        loadChannelData()
     }
 
-    // عميل HTTP مرن جداً يتجاهل أخطاء الشهادات ليدعم المنفذ 4443
-    @android.annotation.SuppressLint("CustomX509TrustManager", "TrustAllX509TrustManager")
-    private fun getUnsafeOkHttpClient(): OkHttpClient {
-        val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-        })
+    // 2. تحديث دالة التحميل لتقرأ من الـ Intent data (الروابط الخارجية)
+    private fun loadChannelData() {
+        val currentIntent = intent // استخدام الـ intent الحالي للنشاط
+        var drmLicense = currentIntent.getStringExtra("drmLicense") ?: ""
+        val referer = currentIntent.getStringExtra("referer") ?: ""
+        val userAgent = currentIntent.getStringExtra("userAgent") ?: ""
 
-        val sslContext = SSLContext.getInstance("SSL")
-        sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-
-        return OkHttpClient.Builder()
-            .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
-            .hostnameVerifier { _, _ -> true }
-            .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
-            .build()
-    }
-
-    private fun initializePlayer(inputUrl: String) {
-        stopStallDetection()
-        stopBufferingTimeout()
-        player?.release()
-        isRecovering = false
-        recoveryAttempts = 0
-        consecutiveErrors = 0
-
-        // 2. تحليل الرابط واستخراج البيانات
-        // 2. تحليل الرابط واستخراج البيانات
-        val fullPath = inputUrl.trim().split("\n").find { it.startsWith("http") } ?: return
-        android.util.Log.e("DEBUG_FULLPATH", fullPath)
-
-        val parts = fullPath.split("|")
-        val url = parts[0].trim()
-
-// 👈 إضافة تعريف المتغيرات الخاصة بالـ DRM
-        var drmType = ""
-        var drmKey = ""
-        if (parts.size > 1) {
-            val drmParts = parts.subList(1, parts.size)
-            drmParts.forEach { part ->
-                if (part.startsWith("drm-info=")) drmType = part.substringAfter("drm-info=")
-                else drmKey = part
+        val rawUrl: String = when {
+            // القادم من قائمة القنوات الداخلية
+            !channelsList.isNullOrEmpty() && currentChannelIndex < (channelsList?.size ?: 0) -> {
+                channelsList!![currentChannelIndex]
             }
-        }
-        // 3. إعداد محدد المسارات (صوت وترجمة)
-        val trackSelector = DefaultTrackSelector(this).apply {
-            setParameters(
-                buildUponParameters()
-                    .setPreferredAudioLanguages("ar", "fr", "en")
-                    .setPreferredTextLanguage("ar")
-                    .setSelectUndeterminedTextLanguage(true)
-            )
+            // القادم كـ Extra مباشر
+            currentIntent.hasExtra("streamUrl") -> {
+                currentIntent.getStringExtra("streamUrl") ?: ""
+            }
+            // القادم من رابط خارجي (نقر من تليجرام أو متصفح)
+            currentIntent.data != null -> {
+                currentIntent.data.toString()
+            }
+            else -> ""
         }
 
-        // 4. إعداد التحكم في التخزين المؤقت (لمنع فصل السيرفر)
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(2500, 30000, 1000, 1500)
-            .setPrioritizeTimeOverSizeThresholds(true)
-            .build()
-
-        // 5. إعداد الاتصال والـ User-Agent
-        val dynamicUserAgent = if (url.contains("mada")) {
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        val urlToPlay: String
+        if (rawUrl.contains("|")) {
+            val parts = rawUrl.split("|")
+            urlToPlay = parts[0].trim()
+            if (parts.size > 1) {
+                drmLicense = parts[1].trim()
+            }
         } else {
-            "VLC/3.0.0 LibVLC/3.0.0"
+            urlToPlay = rawUrl.trim()
         }
+
+        if (urlToPlay.isNotEmpty()) {
+            initializePlayer(urlToPlay, drmLicense, referer, userAgent)
+        }
+    }
+
+    private fun initializePlayer(url: String, drmKey: String, referer: String, userAgent: String) {
+        player?.release()
+
+        val finalUA = when {
+            userAgent.isNotEmpty() -> userAgent
+            url.contains("mada") -> "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            else -> "VLC/3.0.0 LibVLC/3.0.0"
+        }
+
+        val customHeaders = mutableMapOf("Connection" to "keep-alive", "Icy-MetaData" to "1")
+        if (referer.isNotEmpty()) customHeaders["Referer"] = referer
+        if (url.contains("mada")) customHeaders["Referer"] = "https://mada.ps/"
 
         val okHttpFactory = OkHttpDataSource.Factory(getUnsafeOkHttpClient())
-            .setUserAgent(dynamicUserAgent)
-            .setDefaultRequestProperties(mapOf(
-                "Connection" to "keep-alive",
-                "Icy-MetaData" to "1"
-            ))
+            .setUserAgent(finalUA)
+            .setDefaultRequestProperties(customHeaders)
 
-        if (url.contains("mada")) {
-            okHttpFactory.setDefaultRequestProperties(mapOf(
-                "Referer" to "https://mada.ps/",
-                "Origin" to "https://mada.ps"
-            ))
+        val dataSourceFactory = DefaultDataSource.Factory(this, okHttpFactory)
+
+        // --- تنظيف الكود واكتشاف النوع تلقائياً ---
+        val uri = url.toUri() // يتطلب import androidx.core.net.toUri
+        val mediaItemBuilder = MediaItem.Builder().setUri(uri) // تعريف واحد فقط هنا
+
+        // إعدادات الـ DRM
+        if (drmKey.isNotEmpty() && drmKey.contains(":")) {
+            try {
+                val parts = drmKey.split(":")
+                val kid = parts[0].trim()
+                val key = parts[1].trim()
+                val decodedKey =
+                    if (key.length % 4 != 0) key + "=".repeat(4 - key.length % 4) else key
+                val json =
+                    """{"keys":[{"kty":"oct","k":"$decodedKey","kid":"$kid"}],"type":"temporary"}"""
+                val base64Key = Base64.encodeToString(
+                    json.toByteArray(),
+                    Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP
+                )
+
+                mediaItemBuilder.setDrmConfiguration(
+                    MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
+                        .setLicenseUri("data:application/json;base64,$base64Key")
+                        .setMultiSession(true)
+                        .setPlayClearContentWithoutKey(true)
+                        .build()
+                )
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
 
-        // 6. بناء MediaItem مع دعم DRM ونوع الملف
-        val mediaItemBuilder = MediaItem.Builder().setUri(url)
+        // استخدام 'when' كـ subject لتحديد النوع (نظيف جداً)
+        when (Util.inferContentType(uri)) {
+            C.CONTENT_TYPE_DASH -> mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+            C.CONTENT_TYPE_HLS -> mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            C.CONTENT_TYPE_RTSP -> mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_RTSP)
+            else -> {
+                // فحص يدوي للحالات التي لا تتبع المعايير القياسية
+                when {
+                    url.contains(".mpd") -> mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+                    url.contains(".m3u8") || url.contains("hls") -> mediaItemBuilder.setMimeType(
+                        MimeTypes.APPLICATION_M3U8
+                    )
+                }
+            }
+        }
+        // --------------------------------------------------------
 
-        if (drmType.equals("clearkey", ignoreCase = true) && drmKey.contains(":")) {
-            val (kid, key) = drmKey.split(":")
-            val json = """{"keys":[{"kty":"oct","k":"$key","kid":"$kid"}],"type":"temporary"}"""
-            val base64 = android.util.Base64.encodeToString(json.toByteArray(), android.util.Base64.NO_WRAP)
-            mediaItemBuilder.setDrmConfiguration(
-                MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
-                    .setLicenseUri("data:application/json;base64,$base64")
-                    .build()
-            )
+        // 1. استخدام RenderersFactory لدعم فك تشفير كافة أنواع الترجمة (الاحترافي)
+        val renderersFactory = DefaultRenderersFactory(this).apply {
+            // يسمح للمشغل باستخدام فك التشفير البرمجي إذا فشل العتاد (مهم لترجمة MKV)
+            setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         }
 
-        if (url.contains(".mpd")) mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-        else if (url.contains(".m3u8")) mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+        // 2. إعداد اختيار المسارات (صوت عربي/فرنسي + ترجمة عربية)
+        // 1. تحديد حجم الخط بناءً على نوع الجهاز (تلفاز أو هاتف/تابلت)
+        val isTelevision = (resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+                android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
 
-        // 7. بناء المشغل النهائي (مرة واحدة فقط)
-        player = ExoPlayer.Builder(this)
+        val fontSize = if (isTelevision) 34f else 22f // 34 للتلفاز و 22 للهاتف
+
+// 2. إعداد TrackSelector للغات
+        val trackSelector = DefaultTrackSelector(this).apply {
+            parameters = buildUponParameters()
+                .setPreferredAudioLanguages("ar", "fr", "en") // الأولوية: عربي، فرنسي، إنجليزي
+                .setPreferredTextLanguage("ar")               // الترجمة: عربي دائماً
+                .setSelectUndeterminedTextLanguage(true)      // تشغيل الترجمة حتى لو غير معرفة
+                .build()
+        }
+
+// 3. إعدادات التحميل (Buffer)
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(15000, 50000, 2500, 5000)
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBackBuffer(30000, true)
+            .build()
+
+        val errorHandlingPolicy = DefaultLoadErrorHandlingPolicy(3)
+
+// 4. بناء المشغل النهائي
+        player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
             .setMediaSourceFactory(
-                DefaultMediaSourceFactory(this)
-                    .setDataSourceFactory(DefaultDataSource.Factory(this, okHttpFactory))
-                    .setLiveTargetOffsetMs(5000)
+                DefaultMediaSourceFactory(dataSourceFactory)
+                    .setLoadErrorHandlingPolicy(errorHandlingPolicy)
             )
             .build()
             .apply {
                 playerView.player = this
+
+                // --- تنسيق مظهر الترجمة الاحترافي ---
+                playerView.subtitleView?.apply {
+                    visibility = View.VISIBLE
+
+                    // تطبيق الحجم الديناميكي الذي حددناه بالأعلى
+                    setFixedTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize)
+
+                    val style = CaptionStyleCompat(
+                        Color.WHITE,              // لون النص
+                        Color.TRANSPARENT,        // خلفية شفافة تماماً
+                        Color.TRANSPARENT,        // نافذة شفافة
+                        CaptionStyleCompat.EDGE_TYPE_OUTLINE, // حد خارجي أسود لبروز النص
+                        Color.BLACK,              // لون الحد
+                        null
+                    )
+                    setStyle(style)
+                }
+                // ------------------------------------
+
                 setMediaItem(mediaItemBuilder.build())
                 prepare()
                 playWhenReady = true
+                addListener(playerListener)
+            }
+    }
 
-                // إضافة المستمع (Listener) داخل دالة initializePlayer
-                addListener(object : Player.Listener {
-                    override fun onVideoSizeChanged(videoSize: VideoSize) {
-                        if (videoSize.width <= 0 || videoSize.height <= 0) return
-                        val videoRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
-                        val metrics = resources.displayMetrics
-                        val screenRatio = metrics.widthPixels.toFloat() / metrics.heightPixels.toFloat()
-                        val diff = kotlin.math.abs(videoRatio - screenRatio)
-                        playerView.resizeMode = if (diff > 0.35f)
-                            AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        else
-                            AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-                    }
+    private val playerListener = object : Player.Listener {
+        override fun onVideoSizeChanged(videoSize: VideoSize) {
+            super.onVideoSizeChanged(videoSize)
+            playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+        }
 
-                    override fun onPlayerError(error: PlaybackException) {
-                        consecutiveErrors++
-                        logError("خطأ رقم $consecutiveErrors: ${error.message}")
-                        if (consecutiveErrors <= maxConsecutiveErrors) {
-                            handleRecovery()
-                        }
-                    }
+        override fun onPlayerError(error: PlaybackException) {
+            // حل مشكلة الخروج من نافذة البث المباشر (مهم جداً للثبات)
+            if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+                player?.seekToDefaultPosition()
+                player?.prepare()
+            } else {
+                if (consecutiveErrors < maxConsecutiveErrors) {
+                    consecutiveErrors++
+                    player?.prepare() // إعادة المحاولة دون إعادة تحميل القناة بالكامل فوراً
+                } else {
+                    // إذا استمر الخطأ، نعيد تحميل بيانات القناة بالكامل
+                    consecutiveErrors = 0
+                    loadChannelData()
+                }
+            }
+        }
 
-                    override fun onPlaybackStateChanged(state: Int) {
-                        when (state) {
-                            Player.STATE_READY -> {
-                                stopBufferingTimeout()
-                                startStallDetection()
-                                isRecovering = false
-                                recoveryAttempts = 0
-                                consecutiveErrors = 0 // تصفير الأخطاء عند العمل بنجاح
-                            }
-                            Player.STATE_BUFFERING -> startBufferingTimeout()
-                            Player.STATE_ENDED -> handleRecovery()
-                            else -> { /* حالات أخرى */ }
-                        }
-                    }
-                }) // نهاية الـ addListener
-            } // نهاية الـ apply
-    } // نهاية دالة initializePlayer بالكامل
-
-// --- الآن الدوال التالية تكون خارج initializePlayer ومستقلة بذاتها ---
+        override fun onPlaybackStateChanged(state: Int) {
+            if (state == Player.STATE_READY) {
+                consecutiveErrors = 0
+                playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+            } else if (state == Player.STATE_ENDED) {
+                // إذا انتهى البث بشكل مفاجئ، أعد التشغيل من نقطة البداية الحية
+                player?.seekToDefaultPosition()
+                player?.prepare()
+            }
+        }
+    }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
-            val p = player ?: return super.dispatchKeyEvent(event)
             when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_RIGHT -> { seekPlayer(10000); return true }
+                KeyEvent.KEYCODE_DPAD_LEFT -> { seekPlayer(-10000); return true }
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { changeChannel(true); return true }
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { changeChannel(false); return true }
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
-                    if (p.isPlaying) p.pause() else p.play()
+                    player?.let { if (it.isPlaying) it.pause() else it.play() }
                     return true
                 }
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
-                    changeChannel(true)
-                    return true
-                }
-                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
-                    changeChannel(false)
-                    return true
-                }
-                KeyEvent.KEYCODE_BACK -> {
-                    finish()
-                    return true
-                }
+                KeyEvent.KEYCODE_BACK -> { finish(); return true }
             }
         }
         return super.dispatchKeyEvent(event)
     }
 
+    private fun seekPlayer(offset: Long) {
+        player?.let {
+            val duration = it.duration
+            // استخدام coerceIn هو الحل الأمثل والأنظف في كوتلن
+            // فهو يضمن أن القيمة ستبقى حتماً بين 0 ومدة الفيديو
+            val newPosition = (it.currentPosition + offset).coerceIn(0, if (duration > 0) duration else Long.MAX_VALUE)
+            it.seekTo(newPosition)
+        }
+    }
+
     private fun changeChannel(next: Boolean) {
         val list = channelsList ?: return
+        if (list.isEmpty()) return
         currentChannelIndex = if (next) (currentChannelIndex + 1) % list.size else if (currentChannelIndex > 0) currentChannelIndex - 1 else list.size - 1
-        initializePlayer(list[currentChannelIndex])
+        player?.stop()
+        player?.clearMediaItems()
+        loadChannelData()
     }
 
-    private fun startStallDetection() {
-        stopStallDetection()
-        stallCheckRunnable = Runnable {
-            player?.let {
-                if (it.isPlaying && it.currentPosition == lastPlaybackPosition && it.currentPosition > 0) {
-                    stallCounter++
-                    if (stallCounter >= maxStallCount) { handleRecovery(); return@Runnable }
-                } else stallCounter = 0
-                lastPlaybackPosition = it.currentPosition
-                playerView.postDelayed(stallCheckRunnable!!, stallCheckInterval)
-            }
-        }
-        playerView.postDelayed(stallCheckRunnable!!, stallCheckInterval)
-    }
+    @SuppressLint("CustomX509TrustManager")
+    private fun getUnsafeOkHttpClient(): OkHttpClient {
+        return try {
+            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+                @SuppressLint("TrustAllX509TrustManager")
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
 
-    private fun stopStallDetection() { stallCheckRunnable?.let { playerView.removeCallbacks(it) }; stallCounter = 0 }
-    private fun startBufferingTimeout() { stopBufferingTimeout(); bufferingTimeout = Runnable { handleRecovery() }; playerView.postDelayed(bufferingTimeout!!, bufferingTimeoutInterval) }
-    private fun stopBufferingTimeout() { bufferingTimeout?.let { playerView.removeCallbacks(it) } }
+                @SuppressLint("TrustAllX509TrustManager")
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
 
-    private fun handleRecovery() {
-        if (isRecovering) return
-        isRecovering = true
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            })
 
-        player?.let { p ->
-            val currentPos = p.currentPosition
-            val currentMediaItem = p.currentMediaItem
-
-            logError("إعادة إنعاش البث لتجنب التوقف...")
-
-            // نقوم بإيقاف المشغل تماماً وإعادة تهيئته
-            p.stop()
-            p.clearMediaItems()
-
-            if (currentMediaItem != null) {
-                p.setMediaItem(currentMediaItem)
-                // نعود للخلف قليلاً لضمان استمرارية التدفق من السيرفر
-                p.seekTo(if (currentPos > 1000) currentPos - 1000 else 0)
+            val sslContext = SSLContext.getInstance("SSL").apply {
+                init(null, trustAllCerts, java.security.SecureRandom())
             }
 
-            p.prepare()
-            p.play()
-
-            // نترك المشغل قليلاً قبل السماح بمحاولة استعادة أخرى
-            playerView.postDelayed({
-                isRecovering = false
-            }, 3000)
-        } ?: run {
-            isRecovering = false
+            OkHttpClient.Builder()
+                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
+                .build()
+        } catch (_: Exception) { // استخدمنا _ هنا لجعل الكود نظيفاً
+            OkHttpClient()
         }
     }
-
-    // هذه الدالة يجب أن تكون خارج قوس handleRecovery
-    private fun logError(message: String) {
-        android.util.Log.e("PlayerActivity", message)
-    }
-
-    override fun onDestroy() { super.onDestroy(); player?.release(); player = null }
 
     private fun applyImmersiveMode() {
         @Suppress("DEPRECATION")
@@ -364,5 +392,10 @@ class PlayerActivity : AppCompatActivity() {
             View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                     View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
                     View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        player?.release()
     }
 }
