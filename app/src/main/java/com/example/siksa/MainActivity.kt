@@ -8,8 +8,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -20,7 +18,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
@@ -35,16 +32,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONArray
-import java.net.HttpURLConnection
-import java.net.URI
-import java.net.URL
-import android.util.Base64
-import org.json.JSONObject
-import com.example.siksa.PlayerActivity
-import kotlinx.parcelize.Parcelize
-import android.os.Parcelable
-import okhttp3.Response
 import coil.ImageLoader
 import coil.compose.AsyncImage
 import coil.decode.SvgDecoder
@@ -55,14 +42,19 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // 1. جعل المحتوى يمتد خلف حواف الشاشة (خلف الأزرار وشريط الساعة)
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        val controller = WindowInsetsControllerCompat(window, window.decorView).apply {
-            hide(WindowInsetsCompat.Type.statusBars())
-            systemBarsBehavior =
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        // 2. إخفاء شريط الحالة وأزرار التنقل (أزرار الهاتف)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        controller.apply {
+            // إخفاء كل أشرطة النظام
+            hide(WindowInsetsCompat.Type.systemBars())
+            // جعلها تظهر فقط عند السحب من الحافة وتختفي تلقائياً (الوضع الغامر)
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
 
+        // 3. إخفاء العنوان العلوي الافتراضي
         supportActionBar?.hide()
 
         setContent {
@@ -181,6 +173,7 @@ fun PackageListScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         itemsIndexed(rows) { rowIndex, rowItems ->
+            // جعل السطر يملأ كامل العرض
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -198,35 +191,34 @@ fun PackageListScreen(
 
                     Card(
                         modifier = Modifier
-                            .weight(1f)
+                            .weight(1f) // لضمان التمدد وتغطية المساحات الفارغة جهة اليمين
                             .aspectRatio(1f)
                             .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
                             .border(
-                                width = if (isFocused) 3.dp else 1.dp, // إطار خفيف جداً في الحالة العادية
-                                color = if (isFocused) Color.Yellow else Color.White.copy(alpha = 0.1f),
+                                width = if (isFocused) 3.dp else 1.dp,
+                                // تغيير اللون من الأصفر إلى الأبيض عند التركيز ليتناسق مع شاشة القنوات
+                                color = if (isFocused) Color.White else Color.White.copy(alpha = 0.1f),
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .focusable()
                             .clickable { onPackageClick(actualIndex, pkg.url) },
                         shape = RoundedCornerShape(12.dp),
-                        // خلفية داكنة خفيفة تجعل الشعارات الملونة تبرز بشكل أجمل
                         colors = CardDefaults.cardColors(
                             containerColor = Color.Black.copy(alpha = 0.2f)
                         )
                     ) {
                         Box(
-                            modifier = Modifier.fillMaxSize().padding(8.dp), // Padding لمنع التصاق الشعار بالإطار
+                            modifier = Modifier.fillMaxSize().padding(8.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             AsyncImage(
                                 model = ImageRequest.Builder(context)
                                     .data(pkg.logo)
-                                    .setHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                                    .setHeader("User-Agent", "Mozilla/5.0")
                                     .build(),
                                 imageLoader = imageLoader,
                                 contentDescription = null,
-                                // Fit يحافظ على أبعاد الشعار الأصلية ويجعله داخل الإطار بشكل جميل
                                 contentScale = ContentScale.Fit,
                                 modifier = Modifier.fillMaxSize(),
                                 error = painterResource(id = android.R.drawable.ic_menu_gallery),
@@ -235,7 +227,10 @@ fun PackageListScreen(
                         }
                     }
                 }
-                repeat(5 - rowItems.size) { Spacer(modifier = Modifier.weight(1f)) }
+                // إضافة مساحات فارغة (Spacers) بنفس الوزن للحفاظ على توازن السطر الأخير
+                repeat(5 - rowItems.size) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
             }
         }
     }
@@ -256,23 +251,24 @@ fun ChannelListScreen(
         channels = loadChannels(m3uUrl)
     }
 
-    // 1. تغيير التقسيم إلى 6 بدل 7
-    val rows = channels.chunked(6)
+    // عدد الأعمدة 6 لضمان التنسيق في الشاشات الكبيرة
+    val columnCount = 6
+    val rows = channels.chunked(columnCount)
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         itemsIndexed(rows) { rowIndex, rowChannels ->
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            // هنا استخدمنا Row مع fillMaxWidth لحل مشكلة الفراغ جهة اليمين
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                itemsIndexed(rowChannels) { itemIndex, channel ->
-                    // 2. تحديث معادلة الاندكس لتعتمد على 6
-                    val actualIndex = rowIndex * 6 + itemIndex
+                rowChannels.forEachIndexed { itemIndex, channel ->
+                    val actualIndex = rowIndex * columnCount + itemIndex
                     var isFocused by remember { mutableStateOf(false) }
                     val focusRequester = remember(channel.url) { FocusRequester() }
 
@@ -285,9 +281,9 @@ fun ChannelListScreen(
 
                     Card(
                         modifier = Modifier
-                            // 3. تعديل العرض ليناسب 6 إطارات (150dp إلى 160dp عادة ما تكون مثالية لـ 6)
-                            .width(155.dp)
-                            .height(170.dp)
+                            // الحل السحري: weight(1f) يجعل القنوات تتوزع بالتساوي وتملأ الشاشة
+                            .weight(1f)
+                            .height(170.dp) // حافظنا على الارتفاع الأصلي لك
                             .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
                             .border(
@@ -298,7 +294,7 @@ fun ChannelListScreen(
                             .focusable()
                             .clickable {
                                 onChannelClick(actualIndex)
-                                // ... كود التشغيل الخاص بك كما هو بدون تغيير ...
+                                // --- كود التشغيل الخاص بك (دون أي تغيير) ---
                                 val allUrls = ArrayList<String>()
                                 channels.forEach { ch ->
                                     val decodedUrl = decodeBase64Url(ch.url)
@@ -325,6 +321,7 @@ fun ChannelListScreen(
                                 }
                             },
                         shape = RoundedCornerShape(12.dp),
+                        // عدنا للألوان الأصلية الخاصة بك تماماً
                         colors = CardDefaults.cardColors(
                             containerColor = Color.White.copy(alpha = 0.1f)
                         ),
@@ -344,6 +341,7 @@ fun ChannelListScreen(
                                 contentScale = androidx.compose.ui.layout.ContentScale.FillBounds
                             )
 
+                            // شريط اسم القناة (بنفس شفافية كودك السابق 0.5f)
                             Surface(
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
@@ -364,11 +362,17 @@ fun ChannelListScreen(
                         }
                     }
                 }
+
+                // في حال كان السطر يحتوي أقل من 6 قنوات، نضيف فراغات ليبقى التنسيق سليم
+                if (rowChannels.size < columnCount) {
+                    repeat(columnCount - rowChannels.size) {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
             }
         }
     }
 }
-// تأكد أن هذه الدالة موجودة في أسفل الملف ومستوردة بشكل صحيح
 suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
     return withContext(Dispatchers.IO) {
         try {
