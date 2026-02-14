@@ -211,22 +211,20 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun initializePlayer(url: String, drmKey: String, referer: String, userAgent: String) {
         player?.release()
-
         val trackSelector = DefaultTrackSelector(this).apply {
             parameters = buildUponParameters()
                 .setPreferredAudioLanguages("ar", "fr", "en")
                 .setPreferredTextLanguage("ar")
                 .setSelectUndeterminedTextLanguage(true)
+                .setForceHighestSupportedBitrate(false)
                 .build()
         }
 
         val renderersFactory = DefaultRenderersFactory(this).apply {
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
         }
-
         val isTelevision = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
         val fontSize = if (isTelevision) 34f else 22f
-
         val captionStyle = CaptionStyleCompat(Color.WHITE, Color.TRANSPARENT, Color.TRANSPARENT, CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW, Color.BLACK, null)
 
         playerView.subtitleView?.let {
@@ -234,22 +232,35 @@ class PlayerActivity : AppCompatActivity() {
             it.setFixedTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, fontSize)
             it.setStyle(captionStyle)
         }
-
-        val customHeaders = mutableMapOf("Connection" to "keep-alive")
-        if (referer.isNotEmpty()) customHeaders["Referer"] = referer
-
+        val customHeaders = mutableMapOf("Connection" to "keep-alive", "Accept" to "*/*")
+        if (referer.isNotEmpty()) {
+            customHeaders["Referer"] = referer
+        } else if (url.contains("on-tv.site") || url.contains("hilal1.sbs")) {
+            customHeaders["Referer"] = "https://${url.toUri().host}/"
+        }
         val okHttpFactory = OkHttpDataSource.Factory(getUnsafeOkHttpClient())
             .setUserAgent(userAgent.ifEmpty { "VLC/3.0.0" })
             .setDefaultRequestProperties(customHeaders)
 
         val dataSourceFactory = DefaultDataSource.Factory(this, okHttpFactory)
-        val mediaItemBuilder = MediaItem.Builder().setUri(url.toUri())
+        val mediaItemBuilder = MediaItem.Builder()
+            .setUri(url.toUri())
 
         val lowerUrl = url.lowercase()
-        if (lowerUrl.contains("/live/") && (lowerUrl.endsWith(".m3u") || lowerUrl.endsWith(".ts"))) {
-            mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
+        when {
+            lowerUrl.contains("#ext-x-stream-inf") || lowerUrl.contains(".m3u8") || lowerUrl.contains("action=stream") -> {
+                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            }
+            lowerUrl.contains("extension=ts") || lowerUrl.contains("f=ts") || lowerUrl.contains(".ts") -> {
+                mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
+            }
+            lowerUrl.contains(".mpd") -> {
+                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+            }
+            lowerUrl.contains(".php") -> {
+                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+            }
         }
-
         if (drmKey.isNotEmpty() && drmKey.contains(":")) {
             try {
                 val parts = drmKey.split(":")
@@ -261,13 +272,22 @@ class PlayerActivity : AppCompatActivity() {
                 )
             } catch (e: Exception) { e.printStackTrace() }
         }
-
-        val loadControl = DefaultLoadControl.Builder().setBufferDurationsMs(20000, 60000, 2500, 5000).build()
-
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                30000,
+                60000,
+                2000,
+                4000
+            )
+            .setBackBuffer(10000, true)
+            .build()
         player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory).setLoadErrorHandlingPolicy(errorHandlingPolicy))
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(dataSourceFactory)
+                    .setLoadErrorHandlingPolicy(errorHandlingPolicy)
+            )
             .build()
             .apply {
                 playerView.player = this
