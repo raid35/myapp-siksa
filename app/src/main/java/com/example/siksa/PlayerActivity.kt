@@ -37,6 +37,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import android.content.Intent
+import android.widget.TextView
+import android.graphics.drawable.GradientDrawable
+import androidx.core.graphics.toColorInt
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -98,16 +101,47 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun setupUI() {
         val rootLayout = FrameLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
             setBackgroundColor(Color.BLACK)
         }
+
         playerView = PlayerView(this).apply {
-            layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, Gravity.CENTER)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER
+            )
             setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             useController = false
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
         }
         rootLayout.addView(playerView)
+
+        // إضافة العلامة المائية - تم تحديد النوع TextView صراحةً هنا
+        val watermark = TextView(this).apply {
+            text = "S"
+            textSize = 14f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            alpha = 0.3f
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                // استخدام KTX: String.toColorInt()
+                setColor("#22000000".toColorInt())
+                setStroke(1, Color.WHITE)
+            }
+
+            val size = (35 * resources.displayMetrics.density).toInt()
+            layoutParams = FrameLayout.LayoutParams(size, size).apply {
+                gravity = Gravity.BOTTOM or Gravity.START
+                setMargins(40, 0, 0, 30)
+            }
+        }
+
+        rootLayout.addView(watermark)
         setContentView(rootLayout)
     }
     private fun loadChannelData() {
