@@ -423,74 +423,129 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
 }
 suspend fun loadChannels(url: String): List<Channel> {
     return withContext(Dispatchers.IO) {
+        val realUrl = decodeBase64Url(url)
+
+        // 1. إذا كان الرابط بورتال (ماك أدريس)
+        if (isMacPortalUrl(realUrl) || realUrl.contains("portal.php")) {
+            return@withContext loadStalkerPortal(realUrl, "00:1A:79:34:62:66")
+        }
+
+        // 2. إذا كان رابط Xtream أو M3U عادي (كودك الأصلي المعدل قليلاً)
         try {
             val client = OkHttpClient()
-            val realUrl = decodeBase64Url(url)
-
             val request = Request.Builder()
                 .url(realUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                .header("User-Agent", "Mozilla/5.0")
                 .build()
 
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
-
-                val content = response.body?.string()?.trim() ?: ""
-                val channels = mutableListOf<Channel>()
-
-                if (content.contains("#EXTM3U") || content.contains("#EXTINF")) {
-                    val lines = content.lines()
-                    var currentName = ""
-                    var currentLogo = ""
-                    var currentGroup = ""
-                    var currentDrm = ""
-                    var currentReferer = ""
-                    var currentUserAgent = ""
-
-                    for (line in lines) {
-                        val trimmed = line.trim()
-                        if (trimmed.isEmpty()) continue
-
-                        when {
-                            trimmed.startsWith("#EXTINF") -> {
-                                currentName = trimmed.substringAfterLast(",").trim()
-                                currentLogo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
-                                currentGroup = Regex("""group-title=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
-                            }
-                            // استخراج الخصائص المتقدمة (هام جداً للمشغل الخاص بك)
-                            trimmed.startsWith("#EXTVLCOPT:http-referrer=") || trimmed.startsWith("#EXTVLCOPT:referer=") -> {
-                                currentReferer = trimmed.substringAfter("=").trim()
-                            }
-                            trimmed.startsWith("#EXTVLCOPT:http-user-agent=") || trimmed.startsWith("#EXTVLCOPT:user-agent=") -> {
-                                currentUserAgent = trimmed.substringAfter("=").trim()
-                            }
-                            trimmed.startsWith("#KODIPROP:inputstream.adaptive.license_key=") -> {
-                                currentDrm = trimmed.substringAfter("=").trim()
-                            }
-                            // عند الوصول للرابط
-                            !trimmed.startsWith("#") && (trimmed.startsWith("http") || trimmed.startsWith("rtmp")) -> {
-                                channels.add(Channel(
-                                    name = currentName.ifEmpty { "Channel ${channels.size + 1}" },
-                                    url = trimmed,
-                                    logo = currentLogo,
-                                    drmLicense = currentDrm,
-                                    referer = currentReferer,
-                                    userAgent = currentUserAgent,
-                                    group = currentGroup
-                                ))
-                                // تصفير المتغيرات للقناة القادمة
-                                currentName = ""; currentLogo = ""; currentGroup = ""; currentDrm = ""; currentReferer = ""; currentUserAgent = ""
-                            }
-                        }
-                    }
-                }
-                return@withContext channels
+                val content = response.body?.string() ?: ""
+                return@withContext parseM3uContent(content) // دالة تحليل نصوص الـ M3U
             }
         } catch (e: Exception) {
-            e.printStackTrace()
             emptyList()
         }
     }
+}
+suspend fun loadStalkerPortal(baseUrl: String, mac: String): List<Channel> {
+    val client = OkHttpClient()
+    val channels = mutableListOf<Channel>()
+    // تنظيف الرابط لضمان الوصول للـ portal.php
+    val portalApi = if (baseUrl.endsWith(".php")) baseUrl else "$baseUrl/portal.php"
+
+    try {
+        // الخطوة 1: الحصول على التوكن (Handshake)
+        val handshakeUrl = "$portalApi?type=itv&action=handshake"
+        val handshakeReq = Request.Builder()
+            .url(handshakeUrl)
+            .header("User-Agent", "Mozilla/5.0 (QtEmbedded; U; Linux; C) MAG200 stbapp ver: 2 rev: 250 Safari/533.3")
+            .header("X-User-Agent", "Model: MAG250; Link: WiFi")
+            .header("Cookie", "mac=$mac")
+            .build()
+
+        val handshakeRes = client.newCall(handshakeReq).execute().body?.string() ?: ""
+        val token = Regex("""token":"(.*?)"""").find(handshakeRes)?.groupValues?.get(1) ?: ""
+
+        // الخطوة 2: جلب قائمة القنوات
+        val getChannelsUrl = "$portalApi?type=itv&action=get_all_channels&token=$token"
+        val chReq = handshakeReq.newBuilder().url(getChannelsUrl).build()
+
+        client.newCall(chReq).execute().use { response ->
+            val jsonResponse = response.body?.string() ?: ""
+
+            // تحليل الـ JSON (استخراج الاسم، اللوجو، ورابط التشغيل cmd)
+            val pattern = Regex("""\{"id":"(.*?)","name":"(.*?)".*?"logo":"(.*?)".*?"cmd":"(.*?)".*?\}""")
+            pattern.findAll(jsonResponse).forEach { match ->
+                val name = match.groupValues[2]
+                val logo = match.groupValues[3].replace("\\/", "/")
+                val cmd = match.groupValues[4].replace("\\/", "/")
+
+                // تنظيف رابط التشغيل من إضافات ffmpeg
+                val cleanUrl = cmd.replace("ffmpeg ", "").replace("ffrtv ", "")
+
+                channels.add(Channel(
+                    name = name,
+                    url = cleanUrl,
+                    logo = logo,
+                    userAgent = "Model: MAG250; Link: WiFi" // ضروري لتشغيل البث لاحقاً
+                ))
+            }
+        }
+    } catch (e: Exception) { e.printStackTrace() }
+    return channels
+}
+fun parseM3uContent(content: String): List<Channel> {
+    val channels = mutableListOf<Channel>()
+    val lines = content.lines()
+
+    var currentName = ""
+    var currentLogo = ""
+    var currentGroup = ""
+    var currentDrm = ""
+    var currentReferer = ""
+    var currentUserAgent = ""
+
+    for (line in lines) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) continue
+
+        when {
+            trimmed.startsWith("#EXTINF") -> {
+                // استخراج الاسم: نأخذ النص بعد الفاصلة الأخيرة
+                currentName = trimmed.substringAfterLast(",").trim()
+                // استخراج اللوجو باستخدام Regex
+                currentLogo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
+                // استخراج اسم الباقة/المجموعة
+                currentGroup = Regex("""group-title=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
+            }
+            // استخراج خيارات VLC المتقدمة إذا وجدت في الملف
+            trimmed.startsWith("#EXTVLCOPT:http-referrer=") || trimmed.startsWith("#EXTVLCOPT:referer=") -> {
+                currentReferer = trimmed.substringAfter("=").trim()
+            }
+            trimmed.startsWith("#EXTVLCOPT:http-user-agent=") || trimmed.startsWith("#EXTVLCOPT:user-agent=") -> {
+                currentUserAgent = trimmed.substringAfter("=").trim()
+            }
+            trimmed.startsWith("#KODIPROP:inputstream.adaptive.license_key=") -> {
+                currentDrm = trimmed.substringAfter("=").trim()
+            }
+            // عندما نصل لسطر الرابط (الذي يبدأ بـ http أو rtmp)
+            !trimmed.startsWith("#") && (trimmed.startsWith("http") || trimmed.startsWith("rtmp")) -> {
+                channels.add(Channel(
+                    name = currentName.ifEmpty { "قناة غير مسمى" },
+                    url = trimmed,
+                    logo = currentLogo,
+                    drmLicense = currentDrm,
+                    referer = currentReferer,
+                    userAgent = currentUserAgent,
+                    group = currentGroup
+                ))
+                // تصفير المتغيرات استعداداً للقناة القادمة
+                currentName = ""; currentLogo = ""; currentGroup = ""; currentDrm = ""; currentReferer = ""; currentUserAgent = ""
+            }
+        }
+    }
+    return channels
 }
 fun decodeBase64Url(url: String): String {
     return try {
@@ -521,7 +576,8 @@ fun isXtreamCodesUrl(url: String): Boolean {
             lowerUrl.contains("/movie/") ||
             lowerUrl.contains("/series/") ||
             lowerUrl.contains("get.php") ||
-            lowerUrl.contains("player_api.php")
+            lowerUrl.contains("player_api.php") ||
+            lowerUrl.contains("action=stream")
 }
 
 fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
@@ -559,8 +615,11 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
     if (extensionPattern || xtreamPattern) return true
 
     // 4. فحص الكلمات العامة في الرابط
-    val generalKeywords = listOf("video", "stream", "playlist", "tvg-logo", "channellist", "link")
+    val generalKeywords = listOf("video", "stream", "playlist", "tvg-logo", "channellist", "link", "action=stream", "php?id=")
     if (generalKeywords.any { singleLineUrl.contains(it) }) return true
+
+// وأضف هذا التحقق الصريح لروابط الـ API المشابهة لرابطك
+    if (singleLineUrl.contains("api/") && singleLineUrl.contains("action=")) return true
 
     // البروتوكولات المباشرة
     if (singleLineUrl.startsWith("rtmp://") || singleLineUrl.startsWith("rtsp://")) return true
