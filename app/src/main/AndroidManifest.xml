@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
@@ -12,7 +11,6 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
 
-    <!-- Queries for other apps -->
     <queries>
         <package android:name="com.instantbits.cast.webvideo"/>
         <package android:name="com.guoshi.httpcanary"/>
@@ -27,21 +25,19 @@
         </intent>
     </queries>
 
-    <!-- Optional Features -->
     <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
     <uses-feature android:name="android.software.leanback" android:required="false"/>
     <uses-feature android:name="android.software.picture_in_picture" android:required="false"/>
 
-    <!-- Custom Permission -->
     <permission android:name="com.example.siksa.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
         android:protectionLevel="signature"/>
     <uses-permission android:name="com.example.siksa.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"/>
 
-    <!-- Application -->
     <application
         android:theme="@style/Theme.siksa"
         android:label="@string/app_name"
         android:icon="@mipmap/siksa_icon"
+        android:banner="@mipmap/siksa_icon"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:supportsRtl="true"
@@ -51,7 +47,6 @@
         android:roundIcon="@mipmap/siksa_icon"
         android:dataExtractionRules="@xml/data_extraction_rules">
 
-        <!-- MainActivity -->
         <activity
             android:name="com.example.siksa.MainActivity"
             android:exported="true"
@@ -63,29 +58,21 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="http"/>
-                <data android:scheme="https"/>
+                <data android:scheme="http" android:host="siksa.app" />
+                <data android:scheme="https" android:host="siksa.app" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
                 <data android:mimeType="video/*"/>
                 <data android:mimeType="audio/*"/>
                 <data android:mimeType="application/x-mpegurl"/>
                 <data android:mimeType="application/vnd.apple.mpegurl"/>
                 <data android:mimeType="application/dash+xml"/>
             </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <data android:scheme="file"/>
-                <data android:pathPattern=".*\\.m3u8"/>
-                <data android:pathPattern=".*\\.m3u"/>
-                <data android:pathPattern=".*\\.json"/>
-            </intent-filter>
         </activity>
 
-        <!-- Launcher Aliases -->
         <activity-alias
             android:name="com.example.siksa.LauncherTV"
             android:enabled="true"
@@ -96,6 +83,7 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
         </activity-alias>
+
         <activity-alias
             android:name="com.example.siksa.LauncherPhone"
             android:enabled="true"
@@ -107,12 +95,10 @@
             </intent-filter>
         </activity-alias>
 
-        <!-- PlayerActivity -->
         <activity
             android:name="com.example.siksa.PlayerActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:screenOrientation="landscape"
             android:configChanges="smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden|keyboard"
             android:hardwareAccelerated="true"
             android:supportsPictureInPicture="true"
@@ -120,26 +106,16 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
-                <data android:scheme="http"/>
-                <data android:scheme="https"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="http" android:host="player.siksa"/>
+                <data android:scheme="https" android:host="player.siksa"/>
                 <data android:mimeType="video/*"/>
-                <data android:mimeType="application/x-mpegURL"/>
+                <data android:mimeType="application/x-mpegurl"/>
                 <data android:mimeType="application/vnd.apple.mpegurl"/>
                 <data android:mimeType="application/dash+xml"/>
             </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW"/>
-                <category android:name="android.intent.category.DEFAULT"/>
-                <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="siksa"/>
-                <data android:scheme="intent"/>
-                <data android:scheme="xmtv"/>
-                <data android:scheme="vlc"/>
-                <data android:scheme="ssiptv"/>
-            </intent-filter>
         </activity>
 
-        <!-- WebViewActivity -->
         <activity
             android:name="com.example.siksa.WebViewActivity"
             android:exported="true"
@@ -151,12 +127,11 @@
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="http"/>
-                <data android:scheme="https"/>
+                <data android:scheme="http" android:host="web.siksa" />
+                <data android:scheme="https" android:host="web.siksa" />
             </intent-filter>
         </activity>
 
-        <!-- MediaPlaybackService -->
         <service
             android:name="com.example.siksa.service.MediaPlaybackService"
             android:enabled="true"
@@ -168,7 +143,6 @@
             </intent-filter>
         </service>
 
-        <!-- FileProvider -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:exported="false"
