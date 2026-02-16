@@ -49,6 +49,11 @@ class PlayerActivity : AppCompatActivity() {
     private var channelsList: ArrayList<String>? = null
     private var currentChannelIndex = 0
 
+    private lateinit var btnNext: android.widget.ImageView
+    private lateinit var btnPrev: android.widget.ImageView
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val hideControlsRunnable = Runnable { hideOverlayControls() }
+
     private val bufferingHandler = Handler(Looper.getMainLooper())
     private val bufferingRunnable = Runnable {
         player?.let {
@@ -67,7 +72,6 @@ class PlayerActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveMode()
         setupUI()
-
         handleIncomingIntent(intent)
     }
 
@@ -79,7 +83,6 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun handleIncomingIntent(intent: Intent) {
         val dataUri = intent.data
-
         if (dataUri != null) {
             val fullUrl = dataUri.toString()
             if (fullUrl.contains("|")) {
@@ -99,6 +102,44 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun createControlBtn(resId: Int, gravity: Int): android.widget.ImageView {
+        val density = resources.displayMetrics.density
+        val size = (60 * density).toInt()
+        val padding = (12 * density).toInt()
+
+        return android.widget.ImageView(this).apply {
+            setImageResource(resId)
+            setPadding(padding, padding, padding, padding)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            layoutParams = FrameLayout.LayoutParams(size, size).apply {
+                this.gravity = gravity
+                setMargins(50, 0, 50, 0)
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor("#66000000".toColorInt())
+                setStroke(2, Color.WHITE)
+            }
+            visibility = android.view.View.GONE
+        }
+    }
+
+    private fun showOverlayControls() {
+        btnNext.visibility = android.view.View.VISIBLE
+        btnPrev.visibility = android.view.View.VISIBLE
+        resetHideTimer()
+    }
+
+    private fun hideOverlayControls() {
+        btnNext.visibility = android.view.View.GONE
+        btnPrev.visibility = android.view.View.GONE
+    }
+
+    private fun resetHideTimer() {
+        uiHandler.removeCallbacks(hideControlsRunnable)
+        uiHandler.postDelayed(hideControlsRunnable, 3000)
+    }
+
     private fun setupUI() {
         val rootLayout = FrameLayout(this).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -106,6 +147,7 @@ class PlayerActivity : AppCompatActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
             setBackgroundColor(Color.BLACK)
+            setOnClickListener { showOverlayControls() }
         }
 
         playerView = PlayerView(this).apply {
@@ -119,8 +161,15 @@ class PlayerActivity : AppCompatActivity() {
             resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
         }
         rootLayout.addView(playerView)
+        btnPrev = createControlBtn(android.R.drawable.ic_media_previous, Gravity.START or Gravity.CENTER_VERTICAL)
+        btnPrev.setOnClickListener { changeChannel(false); resetHideTimer() }
 
-        // إضافة العلامة المائية - تم تحديد النوع TextView صراحةً هنا
+        btnNext = createControlBtn(android.R.drawable.ic_media_next, Gravity.END or Gravity.CENTER_VERTICAL)
+        btnNext.setOnClickListener { changeChannel(true); resetHideTimer() }
+
+        rootLayout.addView(btnPrev)
+        rootLayout.addView(btnNext)
+
         val watermark = TextView(this).apply {
             text = "S"
             textSize = 14f
@@ -129,39 +178,36 @@ class PlayerActivity : AppCompatActivity() {
             alpha = 0.3f
             background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                // استخدام KTX: String.toColorInt()
                 setColor("#22000000".toColorInt())
                 setStroke(1, Color.WHITE)
             }
-
             val size = (35 * resources.displayMetrics.density).toInt()
             layoutParams = FrameLayout.LayoutParams(size, size).apply {
                 gravity = Gravity.BOTTOM or Gravity.START
                 setMargins(40, 0, 0, 30)
             }
         }
-
         rootLayout.addView(watermark)
         setContentView(rootLayout)
+        showOverlayControls()
     }
+
     private fun loadChannelData() {
         val list = channelsList
         if (!list.isNullOrEmpty() && currentChannelIndex in list.indices) {
             val rawData = list[currentChannelIndex]
             val mediaInfo = extractMediaInfo(rawData)
-
-            val urlToPlay = mediaInfo["url"] ?: ""
-            val userAgent = mediaInfo["userAgent"] ?: "VLC/3.0.0"
-            val referer = mediaInfo["referer"] ?: ""
-            val drmLicense = mediaInfo["drm"] ?: ""
-
-            if (urlToPlay.isNotEmpty()) {
-                initializePlayer(urlToPlay, drmLicense, referer, userAgent)
-            }
+            initializePlayer(
+                mediaInfo["url"] ?: "",
+                mediaInfo["drm"] ?: "",
+                mediaInfo["referer"] ?: "",
+                mediaInfo["userAgent"] ?: "VLC/3.0.0"
+            )
         } else {
             processImmediatePlayback()
         }
     }
+
     @Suppress("unused")
     suspend fun loadChannels(url: String): List<Channel> {
         return withContext(Dispatchers.IO) {
@@ -232,15 +278,11 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun processImmediatePlayback() {
-        val currentIntent = intent
-        val streamUrl = currentIntent.getStringExtra("streamUrl") ?: ""
-        val drmLicense = currentIntent.getStringExtra("drmLicense") ?: ""
-        val referer = currentIntent.getStringExtra("referer") ?: ""
-        val userAgent = currentIntent.getStringExtra("userAgent") ?: "VLC/3.0.0"
-
-        if (streamUrl.isNotEmpty()) {
-            initializePlayer(streamUrl, drmLicense, referer, userAgent)
-        }
+        val streamUrl = intent.getStringExtra("streamUrl") ?: ""
+        val drmLicense = intent.getStringExtra("drmLicense") ?: ""
+        val referer = intent.getStringExtra("referer") ?: ""
+        val userAgent = intent.getStringExtra("userAgent") ?: "VLC/3.0.0"
+        if (streamUrl.isNotEmpty()) initializePlayer(streamUrl, drmLicense, referer, userAgent)
     }
 
     private fun initializePlayer(url: String, drmKey: String, referer: String, userAgent: String) {
@@ -306,24 +348,17 @@ class PlayerActivity : AppCompatActivity() {
                 )
             } catch (e: Exception) { e.printStackTrace() }
         }
+
         val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(
-                30000,
-                60000,
-                2000,
-                4000
-            )
+            .setBufferDurationsMs(30000, 60000, 2000, 4000)
             .setBackBuffer(10000, true)
             .build()
+
         player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(trackSelector)
             .setLoadControl(loadControl)
-            .setMediaSourceFactory(
-                DefaultMediaSourceFactory(dataSourceFactory)
-                    .setLoadErrorHandlingPolicy(errorHandlingPolicy)
-            )
-            .build()
-            .apply {
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory).setLoadErrorHandlingPolicy(errorHandlingPolicy))
+            .build().apply {
                 playerView.player = this
                 setMediaItem(mediaItemBuilder.build())
                 prepare()
@@ -335,19 +370,16 @@ class PlayerActivity : AppCompatActivity() {
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             bufferingHandler.removeCallbacks(bufferingRunnable)
-            if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
-                player?.seekToDefaultPosition()
-            }
+            if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) player?.seekToDefaultPosition()
             player?.prepare()
         }
-
         override fun onPlaybackStateChanged(state: Int) {
             bufferingHandler.removeCallbacks(bufferingRunnable)
             when (state) {
                 Player.STATE_BUFFERING -> bufferingHandler.postDelayed(bufferingRunnable, 15000)
                 Player.STATE_IDLE -> player?.prepare()
                 Player.STATE_ENDED -> { player?.seekToDefaultPosition(); player?.prepare() }
-                Player.STATE_READY -> { /* OK */ }
+                else -> {}
             }
         }
     }
@@ -411,18 +443,9 @@ class PlayerActivity : AppCompatActivity() {
                 override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
                 override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
             })
-
-            val sslContext = SSLContext.getInstance("SSL").apply {
-                init(null, trustAllCerts, java.security.SecureRandom())
-            }
-
-            OkHttpClient.Builder()
-                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
-                .hostnameVerifier { _, _ -> true }
-                .build()
-        } catch (_: Exception) {
-            OkHttpClient()
-        }
+            val sslContext = SSLContext.getInstance("SSL").apply { init(null, trustAllCerts, java.security.SecureRandom()) }
+            OkHttpClient.Builder().sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager).hostnameVerifier { _, _ -> true }.build()
+        } catch (_: Exception) { OkHttpClient() }
     }
 
     private fun applyImmersiveMode() {
@@ -435,17 +458,14 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun decodeBase64Url(url: String): String {
         return try {
-            if (url.isNotEmpty() && !url.startsWith("http") && url.length % 4 == 0) {
-                String(Base64.decode(url, Base64.DEFAULT))
-            } else url
-        } catch (_: Exception) {
-            url
-        }
+            if (url.isNotEmpty() && !url.startsWith("http") && url.length % 4 == 0) String(Base64.decode(url, Base64.DEFAULT)) else url
+        } catch (_: Exception) { url }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         bufferingHandler.removeCallbacksAndMessages(null)
+        uiHandler.removeCallbacksAndMessages(null)
         player?.release()
     }
 }
