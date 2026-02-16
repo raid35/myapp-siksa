@@ -16,6 +16,7 @@ import androidx.core.net.toUri
 import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.activity.OnBackPressedCallback
 
 @SuppressLint("SetJavaScriptEnabled")
 class WebViewActivity : AppCompatActivity() {
@@ -40,6 +41,18 @@ class WebViewActivity : AppCompatActivity() {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
         urlToLoad = intent.getStringExtra("url") ?: return
+
+        // نظام الرجوع الحديث
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (webView.canGoBack()) {
+                    webView.goBack()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
 
         webView = WebView(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -67,8 +80,6 @@ class WebViewActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
-
-                    // هنا قمنا بحل المشكلة: تعريف الكود ثم تنفيذه فوراً
                     val script = """
                         (function() {
                             var v = document.querySelector('video');
@@ -85,8 +96,6 @@ class WebViewActivity : AppCompatActivity() {
                             document.body.style.backgroundColor = 'black';
                         })()
                     """.trimIndent()
-
-                    // تنفيذ الكود داخل المتصفح
                     view?.evaluateJavascript(script, null)
                 }
             }
@@ -97,6 +106,17 @@ class WebViewActivity : AppCompatActivity() {
             setBackgroundColor(Color.BLACK)
             addView(webView, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         })
+    }
+
+    // هذه الدالة مهمة جداً لأنك تستخدم singleTask في المانيفست
+    // تمنع إغلاق النشاط عند استلام نداء جديد أو العودة إليه
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val newUrl = intent.getStringExtra("url")
+        if (!newUrl.isNullOrEmpty() && newUrl != webView.url) {
+            webView.loadUrl(newUrl)
+        }
     }
 
     private fun shouldOpenInXpola(url: String): Boolean {
@@ -111,39 +131,33 @@ class WebViewActivity : AppCompatActivity() {
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 data = url.toUri()
                 setPackage("com.xpola.player")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                // لا نستخدم finish() هنا
             }
             startActivity(intent)
         } catch (_: ActivityNotFoundException) {
-            val fallback = Intent(Intent.ACTION_VIEW, url.toUri())
-            startActivity(Intent.createChooser(fallback, "اختر مشغل الفيديو"))
+            try {
+                val fallback = Intent(Intent.ACTION_VIEW, url.toUri())
+                startActivity(Intent.createChooser(fallback, "اختر مشغل الفيديو"))
+            } catch (_: Exception) {}
         }
-        finish()
-    }
-    // 1. عند خروج المستخدم مؤقتاً من التطبيق (مثلاً ضغط زر الهوم)
-    override fun onPause() {
-        super.onPause()
-        webView.onPause() // إيقاف تشغيل الرندرة والـ JavaScript مؤقتاً
-        webView.pauseTimers() // إيقاف المؤقتات لمنع استهلاك المعالج والصوت
     }
 
-    // 2. عند العودة للتطبيق مرة أخرى
+    override fun onPause() {
+        super.onPause()
+        // ملاحظة: لا نوقف المؤقتات هنا لأنها قد تسبب تجمد الصفحة عند العودة
+        webView.onPause()
+    }
+
     override fun onResume() {
         super.onResume()
         webView.onResume()
-        webView.resumeTimers()
     }
 
-    // 3. الحل النهائي: عند إغلاق الصفحة والعودة لقائمة القنوات
     override fun onDestroy() {
-        // تحميل صفحة فارغة لضمان توقف أي بث فيديو أو صوت تماماً
         webView.loadUrl("about:blank")
-
-        // تدمير الـ WebView من الذاكرة
         webView.stopLoading()
         webView.removeAllViews()
         webView.destroy()
-
         super.onDestroy()
     }
 }
