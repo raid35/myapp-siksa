@@ -18,7 +18,6 @@ import androidx.media3.common.*
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
@@ -40,6 +39,9 @@ import android.content.Intent
 import android.widget.TextView
 import android.graphics.drawable.GradientDrawable
 import androidx.core.graphics.toColorInt
+import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
@@ -197,11 +199,12 @@ class PlayerActivity : AppCompatActivity() {
         if (!list.isNullOrEmpty() && currentChannelIndex in list.indices) {
             val rawData = list[currentChannelIndex]
             val mediaInfo = extractMediaInfo(rawData)
+
             initializePlayer(
                 mediaInfo["url"] ?: "",
                 mediaInfo["drm"] ?: "",
                 mediaInfo["referer"] ?: "",
-                mediaInfo["userAgent"] ?: "VLC/3.0.0"
+                mediaInfo["userAgent"] ?: ""
             )
         } else {
             processImmediatePlayback()
@@ -241,15 +244,13 @@ class PlayerActivity : AppCompatActivity() {
                                     currentLogo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
                                     currentGroup = Regex("""group-title=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
                                 }
-                                trimmed.contains("referrer=") || trimmed.contains("referer=") -> {
+                                trimmed.lowercase().contains("referer") || trimmed.lowercase().contains("referrer") -> {
                                     currentReferer = trimmed.substringAfter("=").trim()
                                 }
-                                trimmed.contains("user-agent=") -> {
+                                trimmed.lowercase().contains("user-agent") -> {
                                     currentUserAgent = trimmed.substringAfter("=").trim()
                                 }
-
-                                // استخراج DRM
-                                trimmed.contains("license_key=") -> {
+                                trimmed.contains("license_key=") || trimmed.contains("inputstream.adaptive.license_key=") -> {
                                     currentDrm = trimmed.substringAfter("=").trim()
                                 }
                                 !trimmed.startsWith("#") && (trimmed.startsWith("http") || trimmed.startsWith("rtmp")) -> {
@@ -281,82 +282,81 @@ class PlayerActivity : AppCompatActivity() {
         val streamUrl = intent.getStringExtra("streamUrl") ?: ""
         val drmLicense = intent.getStringExtra("drmLicense") ?: ""
         val referer = intent.getStringExtra("referer") ?: ""
-        val userAgent = intent.getStringExtra("userAgent") ?: "VLC/3.0.0"
-        if (streamUrl.isNotEmpty()) initializePlayer(streamUrl, drmLicense, referer, userAgent)
+        val userAgent = intent.getStringExtra("userAgent") ?: ""
+
+        if (streamUrl.isNotEmpty()) {
+            initializePlayer(streamUrl, drmLicense, referer, userAgent)
+        }
     }
 
     private fun initializePlayer(url: String, drmKey: String, referer: String, userAgent: String) {
         player?.release()
-        val trackSelector = DefaultTrackSelector(this).apply {
-            parameters = buildUponParameters()
-                .setPreferredAudioLanguages("ar", "fr", "en")
-                .setPreferredTextLanguage("ar")
-                .setSelectUndeterminedTextLanguage(true)
-                .setForceHighestSupportedBitrate(false)
-                .build()
-        }
+
+        val bandwidthMeter = DefaultBandwidthMeter.Builder(this).build()
+
+        val trackSelectionFactory = AdaptiveTrackSelection.Factory()
+        val trackSelector = DefaultTrackSelector(this, trackSelectionFactory)
+        trackSelector.parameters = trackSelector.buildUponParameters()
+            .setPreferredAudioLanguages("ar", "fr", "en")
+            .setPreferredTextLanguage("ar")
+            .setSelectUndeterminedTextLanguage(true)
+            .setForceHighestSupportedBitrate(false)
+            .build()
 
         val renderersFactory = DefaultRenderersFactory(this).apply {
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
-        }
-        val isTelevision = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-        val fontSize = if (isTelevision) 34f else 22f
-        val captionStyle = CaptionStyleCompat(Color.WHITE, Color.TRANSPARENT, Color.TRANSPARENT, CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW, Color.BLACK, null)
-
-        playerView.subtitleView?.let {
-            it.setApplyEmbeddedStyles(false)
-            it.setFixedTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, fontSize)
-            it.setStyle(captionStyle)
+            setEnableDecoderFallback(true)
         }
         val customHeaders = mutableMapOf("Connection" to "keep-alive", "Accept" to "*/*")
-        if (referer.isNotEmpty()) {
-            customHeaders["Referer"] = referer
-        } else if (url.contains("on-tv.site") || url.contains("hilal1.sbs")) {
-            customHeaders["Referer"] = "https://${url.toUri().host}/"
+        if (referer.isNotEmpty()) customHeaders["Referer"] = referer
+
+        val finalUserAgent = when {
+            url.contains("dash") || url.contains(".mpd") ->
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            else -> userAgent.ifEmpty { "VLC/3.0.0" }
         }
+
         val okHttpFactory = OkHttpDataSource.Factory(getUnsafeOkHttpClient())
-            .setUserAgent(userAgent.ifEmpty { "VLC/3.0.0" })
+            .setUserAgent(finalUserAgent)
             .setDefaultRequestProperties(customHeaders)
 
         val dataSourceFactory = DefaultDataSource.Factory(this, okHttpFactory)
-        val mediaItemBuilder = MediaItem.Builder()
-            .setUri(url.toUri())
+            .setTransferListener(bandwidthMeter)
 
-        val lowerUrl = url.lowercase()
-        when {
-            lowerUrl.contains("#ext-x-stream-inf") || lowerUrl.contains(".m3u8") || lowerUrl.contains("action=stream") -> {
-                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-            }
-            lowerUrl.contains("extension=ts") || lowerUrl.contains("f=ts") || lowerUrl.contains(".ts") -> {
-                mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
-            }
-            lowerUrl.contains(".mpd") -> {
-                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-            }
-            lowerUrl.contains(".php") -> {
-                mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+        val mediaItemBuilder = MediaItem.Builder().setUri(url.toUri())
+        url.lowercase().let { lowerUrl ->
+            when {
+                lowerUrl.contains(".m3u8") || lowerUrl.contains("#ext-x-stream-inf") ||
+                        (lowerUrl.contains(".php") && !lowerUrl.contains("extension=ts")) -> {
+                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
+                }
+                lowerUrl.contains(".mpd") || lowerUrl.contains("dash") || lowerUrl.contains("manifest") -> {
+                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
+                }
+                lowerUrl.contains(".ts") || lowerUrl.contains("f=ts") || lowerUrl.contains("extension=ts") -> {
+                    mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
+                }
             }
         }
         if (drmKey.isNotEmpty() && drmKey.contains(":")) {
             try {
                 val parts = drmKey.split(":")
-                val json = """{"keys":[{"kty":"oct","k":"${parts[1].trim()}","kid":"${parts[0].trim()}"}],"type":"temporary"}"""
-                val base64Key = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-                mediaItemBuilder.setDrmConfiguration(
-                    MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
-                        .setLicenseUri("data:application/json;base64,$base64Key").build()
-                )
+                if (parts.size >= 2) {
+                    val json = """{"keys":[{"kty":"oct","k":"${parts[1].trim()}","kid":"${parts[0].trim()}"}],"type":"temporary"}"""
+                    val base64Key = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                    mediaItemBuilder.setDrmConfiguration(
+                        MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
+                            .setLicenseUri("data:application/json;base64,$base64Key")
+                            .setMultiSession(true)
+                            .setForceDefaultLicenseUri(true)
+                            .build()
+                    )
+                }
             } catch (e: Exception) { e.printStackTrace() }
         }
-
-        val loadControl = DefaultLoadControl.Builder()
-            .setBufferDurationsMs(30000, 60000, 2000, 4000)
-            .setBackBuffer(10000, true)
-            .build()
-
         player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(trackSelector)
-            .setLoadControl(loadControl)
+            .setBandwidthMeter(bandwidthMeter)
             .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory).setLoadErrorHandlingPolicy(errorHandlingPolicy))
             .build().apply {
                 playerView.player = this
@@ -365,6 +365,16 @@ class PlayerActivity : AppCompatActivity() {
                 playWhenReady = true
                 addListener(playerListener)
             }
+
+        setupSubtitleStyle()
+    }
+    private fun setupSubtitleStyle() {
+        val isTelevision = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+        playerView.subtitleView?.apply {
+            setApplyEmbeddedStyles(false)
+            setFixedTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, if (isTelevision) 34f else 22f)
+            setStyle(CaptionStyleCompat(Color.WHITE, Color.TRANSPARENT, Color.TRANSPARENT, CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW, Color.BLACK, null))
+        }
     }
 
     private val playerListener = object : Player.Listener {
@@ -387,15 +397,34 @@ class PlayerActivity : AppCompatActivity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN) {
             when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_RIGHT -> { seekPlayer(10000); return true }
-                KeyEvent.KEYCODE_DPAD_LEFT -> { seekPlayer(-10000); return true }
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { changeChannel(true); return true }
-                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { changeChannel(false); return true }
+                KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                    seekPlayer(15000)
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_LEFT -> {
+                    seekPlayer(-15000)
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> {
+                    changeChannel(true)
+                    return true
+                }
+
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> {
+                    changeChannel(false)
+                    return true
+                }
+
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                     player?.let { if (it.isPlaying) it.pause() else it.play() }
                     return true
                 }
-                KeyEvent.KEYCODE_BACK -> { finish(); return true }
+
+                KeyEvent.KEYCODE_BACK -> {
+                    finish()
+                    return true
+                }
             }
         }
         return super.dispatchKeyEvent(event)
@@ -420,13 +449,19 @@ class PlayerActivity : AppCompatActivity() {
     private fun extractMediaInfo(fullLine: String): Map<String, String> {
         val info = mutableMapOf<String, String>()
         val parts = fullLine.split("|")
+
         if (parts.isNotEmpty()) {
-            info["url"] = parts[0]
-            parts.forEach { part ->
+            info["url"] = parts[0].trim()
+            for (i in 1 until parts.size) {
+                val part = parts[i].trim()
                 when {
-                    part.startsWith("userAgent=") -> info["userAgent"] = part.substringAfter("=")
-                    part.startsWith("referer=") -> info["referer"] = part.substringAfter("=")
-                    part.startsWith("drm=") -> info["drm"] = part.substringAfter("=")
+                    part.startsWith("userAgent=", ignoreCase = true) ->
+                        info["userAgent"] = part.substringAfter("=").trim()
+
+                    part.startsWith("referer=", ignoreCase = true) ->
+                        info["referer"] = part.substringAfter("=").trim()
+                    part.startsWith("drm=", ignoreCase = true) || part.startsWith("license_key=", ignoreCase = true) ->
+                        info["drm"] = part.substringAfter("=").trim()
                 }
             }
         }
