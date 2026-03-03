@@ -1,10 +1,12 @@
 package com.example.siksa
 
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -15,73 +17,92 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsControllerCompat
-import coil.compose.rememberAsyncImagePainter
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import coil.ImageLoader
+import coil.compose.AsyncImage
+import coil.compose.rememberAsyncImagePainter
+import coil.decode.SvgDecoder
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import coil.ImageLoader
-import coil.compose.AsyncImage
-import coil.decode.SvgDecoder
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.res.painterResource
 
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        checkForSniffers()
         super.onCreate(savedInstanceState)
 
-        // 1. جعل المحتوى يمتد خلف حواف الشاشة (خلف الأزرار وشريط الساعة)
+        // إعدادات الشاشة الكاملة
         WindowCompat.setDecorFitsSystemWindows(window, false)
-
-        // 2. إخفاء شريط الحالة وأزرار التنقل (أزرار الهاتف)
-        val controller = WindowInsetsControllerCompat(window, window.decorView)
-        controller.apply {
-            // إخفاء كل أشرطة النظام
+        WindowInsetsControllerCompat(window, window.decorView).apply {
             hide(WindowInsetsCompat.Type.systemBars())
-            // جعلها تظهر فقط عند السحب من الحافة وتختفي تلقائياً (الوضع الغامر)
             systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
-
-        // 3. إخفاء العنوان العلوي الافتراضي
         supportActionBar?.hide()
 
         setContent {
+            // خلفية متحركة (يجب أن تكون معرفة في مشروعك)
             AnimatedGradientBackground {
                 var selectedPackageUrl by remember { mutableStateOf<String?>(null) }
                 var selectedIndex by remember { mutableStateOf(0) }
                 var selectedChannelIndex by remember { mutableStateOf(0) }
 
-                val externalM3uUrl = remember { getExternalM3uUrl() }
+                // إدارة الروابط الخارجية
+                val externalUrl = remember { getExternalM3uUrl() }
 
                 when {
-                    externalM3uUrl != null -> {
-                        ChannelListScreen(
-                            m3uUrl = externalM3uUrl,
-                            selectedIndex = selectedChannelIndex,
-                            onChannelClick = { selectedChannelIndex = it },
-                            onBack = { finish() }
-                        )
+                    externalUrl != null -> {
+                        val lowerUrl = externalUrl.lowercase().trim()
+
+                        // إذا كان الرابط فيديو مباشر وصريح، افتح المشغل
+                        if (isActuallyDirectVideo(lowerUrl)) {
+                            LaunchedEffect(externalUrl) {
+                                val intent = Intent(this@MainActivity, PlayerActivity::class.java).apply {
+                                    data = Uri.parse(externalUrl)
+                                    putExtra("streamUrl", externalUrl)
+                                }
+                                startActivity(intent)
+                                finish()
+                            }
+                        } else {
+                            // عرض القائمة عند استقبال ملف M3U
+                            ChannelListScreen(
+                                m3uUrl = externalUrl,
+                                selectedIndex = selectedChannelIndex,
+                                onChannelClick = { selectedChannelIndex = it },
+                                onBack = { finish() }
+                            )
+                        }
                     }
 
                     selectedPackageUrl == null -> {
                         PackageListScreen(
                             selectedIndex = selectedIndex,
                             onPackageClick = { index, url ->
-                                selectedIndex = index
-                                selectedChannelIndex = 0
-                                selectedPackageUrl = url
+                                handleUrlNavigation(index, url) { idx, u, isWeb ->
+                                    if (isWeb) {
+                                        openWebView(u)
+                                    } else {
+                                        selectedIndex = idx
+                                        selectedPackageUrl = u
+                                    }
+                                }
                             }
                         )
                     }
@@ -102,44 +123,88 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun getExternalM3uUrl(): String? {
-        val action = intent?.action
-        val data = intent?.data
-        val mimeType = intent?.type
+    // منطق التنقل الذكي
+    private fun handleUrlNavigation(index: Int, url: String, onNavigate: (Int, String, Boolean) -> Unit) {
+        val lowerUrl = url.lowercase().trim()
+        val isWeb = lowerUrl.endsWith(".html") || lowerUrl.endsWith(".htm") || lowerUrl.contains("github.io")
+        onNavigate(index, url, isWeb)
+    }
 
+    private fun openWebView(url: String) {
+        val intent = Intent(this, WebViewActivity::class.java).apply {
+            putExtra("url", url)
+            putExtra("userAgent", "Mozilla/5.0 (Linux; Android 10)")
+        }
+        startActivity(intent)
+    }
+
+    private fun isActuallyDirectVideo(url: String): Boolean {
+        if (url.contains(".m3u") || url.contains(".m3u8") || url.contains("type=m3u")) return false
+        val directExtensions = listOf(".mp4", ".ts", ".mkv", ".mov", ".avi")
+        return directExtensions.any { url.endsWith(it) } || url.startsWith("rtmp://")
+    }
+
+    private fun checkForSniffers() {
+        val sniffers = listOf("com.guoshi.httpcanary", "com.xk72.charles", "com.egorovandreyev.httpdebugger")
+        sniffers.forEach { pkg ->
+            try {
+                packageManager.getPackageInfo(pkg, 0)
+                finishAffinity(); System.exit(0)
+            } catch (e: Exception) {}
+        }
+    }
+
+    private fun getExternalM3uUrl(): String? {
+        val data = intent?.data
         return when {
-            // حالة استقبال رابط مباشر أو ملف من مدير الملفات
-            action == Intent.ACTION_VIEW && data != null -> {
-                val url = data.toString()
-                // فحص النوع بناءً على الملحق أو النوع البرمجي (MIME Type)
-                if (url.endsWith(".m3u") || url.endsWith(".m3u8") || url.endsWith(".json") ||
-                    url.contains("m3u") || mimeType?.contains("mpegurl") == true ||
-                    mimeType?.contains("video/") == true || mimeType?.contains("application/octet-stream") == true
-                ) {
-                    url
-                } else {
-                    url // نمرر الرابط على أي حال ليحاول التطبيق تشغيله
-                }
-            }
-            // الروابط المرسلة من داخل التطبيق عبر Extras
+            intent?.action == Intent.ACTION_VIEW && data != null -> data.toString()
             intent?.hasExtra("m3u_url") == true -> intent.getStringExtra("m3u_url")
-            intent?.hasExtra("streamUrl") == true -> intent.getStringExtra("streamUrl")
             else -> null
         }
     }
 
-    // تحديث التعامل مع الأوامر الجديدة عند إعادة تشغيل النشاط
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        // فحص الرابط الجديد، إذا وجد نقوم بتحديث الحالة
-        val newUrl = getExternalM3uUrl()
-        if (newUrl != null) {
-            recreate() // إعادة تشغيل الواجهة لتحميل الرابط الجديد
-        }
+        if (getExternalM3uUrl() != null) recreate()
     }
 }
 
+@Composable
+fun PackageItemCard(
+    pkg: PackageItem,
+    isFocused: Boolean,
+    onFocusChange: (Boolean) -> Unit,
+    onClick: () -> Unit,
+    imageLoader: ImageLoader
+) {
+    val scale by animateFloatAsState(if (isFocused) 1.1f else 1.0f)
+
+    Card(
+        modifier = Modifier
+            .padding(4.dp)
+            .aspectRatio(1f)
+            .scale(scale)
+            .onFocusChanged { onFocusChange(it.isFocused) }
+            .border(
+                width = if (isFocused) 3.dp else 1.dp,
+                color = if (isFocused) Color.White else Color.White.copy(0.1f),
+                shape = RoundedCornerShape(12.dp)
+            )
+            .clickable { onClick() },
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Black.copy(0.2f))
+    ) {
+        AsyncImage(
+            model = ImageRequest.Builder(LocalContext.current).data(pkg.logo).build(),
+            imageLoader = imageLoader,
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.fillMaxSize().padding(12.dp),
+            error = painterResource(android.R.drawable.ic_menu_report_image)
+        )
+    }
+}
 @Composable
 fun PackageListScreen(
     selectedIndex: Int?,
@@ -173,7 +238,6 @@ fun PackageListScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         itemsIndexed(rows) { rowIndex, rowItems ->
-            // جعل السطر يملأ كامل العرض
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
@@ -191,7 +255,7 @@ fun PackageListScreen(
 
                     Card(
                         modifier = Modifier
-                            .weight(1f) // لضمان التمدد وتغطية المساحات الفارغة جهة اليمين
+                            .weight(1f)
                             .aspectRatio(1f)
                             .focusRequester(focusRequester)
                             .onFocusChanged { isFocused = it.isFocused }
@@ -227,7 +291,6 @@ fun PackageListScreen(
                         }
                     }
                 }
-                // إضافة مساحات فارغة (Spacers) بنفس الوزن للحفاظ على توازن السطر الأخير
                 repeat(5 - rowItems.size) {
                     Spacer(modifier = Modifier.weight(1f))
                 }
@@ -246,10 +309,7 @@ fun ChannelListScreen(
     var channels by remember { mutableStateOf(listOf<Channel>()) }
 
     BackHandler { onBack() }
-
-    // هنا يتم استدعاء الدالة، وسيختفي تنبيه "Never used" بمجرد تشغيل التطبيق
     LaunchedEffect(m3uUrl) {
-        // هنا يتم "استخدام" الدالة فعلياً وتختفي رسالة "Never used"
         channels = loadChannels(m3uUrl)
     }
 
@@ -293,12 +353,9 @@ fun ChannelListScreen(
                             .focusable()
                             .clickable {
                                 onChannelClick(actualIndex)
-
-                                // تجهيز القائمة للمشغل بصيغة النص المدمج |
                                 val allUrls = ArrayList<String>()
                                 channels.forEach { ch ->
                                     val decodedUrl = decodeBase64Url(ch.url)
-                                    // نجمع كل خصائص القناة في سطر واحد ليفهمها المشغل عند التقليب
                                     val line = "$decodedUrl|drm=${ch.drmLicense}|userAgent=${ch.userAgent}|referer=${ch.referer}"
                                     allUrls.add(line)
                                 }
@@ -361,8 +418,6 @@ fun ChannelListScreen(
                         }
                     }
                 }
-
-                // ملء الفراغات لضمان توازن الأعمدة
                 if (rowChannels.size < columnCount) {
                     repeat(columnCount - rowChannels.size) {
                         Spacer(modifier = Modifier.weight(1f))
@@ -376,7 +431,6 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
     return withContext(Dispatchers.IO) {
         try {
             val client = OkHttpClient()
-            // استخدام User-Agent موحد كما في دالة القنوات
             val request = Request.Builder()
                 .url(url)
                 .header("User-Agent", "Mozilla/5.0")
@@ -397,14 +451,10 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
                 if (trimmed.isEmpty()) continue
 
                 if (trimmed.startsWith("#EXTINF")) {
-                    // استخراج الاسم بعد الفاصلة الأخيرة (نفس منطق دالة القنوات)
                     name = trimmed.substringAfterLast(",").trim()
-
-                    // استخراج اللوجو مع إضافة .trim() لضمان حذف المسافات الزائدة التي لاحظناها في ملفك
                     logo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1)?.trim() ?: ""
 
                 } else if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
-                    // إضافة الباقة وتصفير المتغيرات للدورة القادمة
                     packages.add(PackageItem(
                         name = name.ifEmpty { "Package ${packages.size + 1}" },
                         logo = logo,
@@ -424,13 +474,9 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
 suspend fun loadChannels(url: String): List<Channel> {
     return withContext(Dispatchers.IO) {
         val realUrl = decodeBase64Url(url)
-
-        // 1. إذا كان الرابط بورتال (ماك أدريس)
         if (isMacPortalUrl(realUrl) || realUrl.contains("portal.php")) {
             return@withContext loadStalkerPortal(realUrl, "00:1A:79:34:62:66")
         }
-
-        // 2. إذا كان رابط Xtream أو M3U عادي (كودك الأصلي المعدل قليلاً)
         try {
             val client = OkHttpClient()
             val request = Request.Builder()
@@ -441,7 +487,7 @@ suspend fun loadChannels(url: String): List<Channel> {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
                 val content = response.body?.string() ?: ""
-                return@withContext parseM3uContent(content) // دالة تحليل نصوص الـ M3U
+                return@withContext parseM3uContent(content)
             }
         } catch (e: Exception) {
             emptyList()
@@ -451,11 +497,9 @@ suspend fun loadChannels(url: String): List<Channel> {
 suspend fun loadStalkerPortal(baseUrl: String, mac: String): List<Channel> {
     val client = OkHttpClient()
     val channels = mutableListOf<Channel>()
-    // تنظيف الرابط لضمان الوصول للـ portal.php
     val portalApi = if (baseUrl.endsWith(".php")) baseUrl else "$baseUrl/portal.php"
 
     try {
-        // الخطوة 1: الحصول على التوكن (Handshake)
         val handshakeUrl = "$portalApi?type=itv&action=handshake"
         val handshakeReq = Request.Builder()
             .url(handshakeUrl)
@@ -466,29 +510,23 @@ suspend fun loadStalkerPortal(baseUrl: String, mac: String): List<Channel> {
 
         val handshakeRes = client.newCall(handshakeReq).execute().body?.string() ?: ""
         val token = Regex("""token":"(.*?)"""").find(handshakeRes)?.groupValues?.get(1) ?: ""
-
-        // الخطوة 2: جلب قائمة القنوات
         val getChannelsUrl = "$portalApi?type=itv&action=get_all_channels&token=$token"
         val chReq = handshakeReq.newBuilder().url(getChannelsUrl).build()
 
         client.newCall(chReq).execute().use { response ->
             val jsonResponse = response.body?.string() ?: ""
-
-            // تحليل الـ JSON (استخراج الاسم، اللوجو، ورابط التشغيل cmd)
             val pattern = Regex("""\{"id":"(.*?)","name":"(.*?)".*?"logo":"(.*?)".*?"cmd":"(.*?)".*?\}""")
             pattern.findAll(jsonResponse).forEach { match ->
                 val name = match.groupValues[2]
                 val logo = match.groupValues[3].replace("\\/", "/")
                 val cmd = match.groupValues[4].replace("\\/", "/")
-
-                // تنظيف رابط التشغيل من إضافات ffmpeg
                 val cleanUrl = cmd.replace("ffmpeg ", "").replace("ffrtv ", "")
 
                 channels.add(Channel(
                     name = name,
                     url = cleanUrl,
                     logo = logo,
-                    userAgent = "Model: MAG250; Link: WiFi" // ضروري لتشغيل البث لاحقاً
+                    userAgent = "Model: MAG250; Link: WiFi"
                 ))
             }
         }
@@ -512,14 +550,10 @@ fun parseM3uContent(content: String): List<Channel> {
 
         when {
             trimmed.startsWith("#EXTINF") -> {
-                // استخراج الاسم: نأخذ النص بعد الفاصلة الأخيرة
                 currentName = trimmed.substringAfterLast(",").trim()
-                // استخراج اللوجو باستخدام Regex
                 currentLogo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
-                // استخراج اسم الباقة/المجموعة
                 currentGroup = Regex("""group-title=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
             }
-            // استخراج خيارات VLC المتقدمة إذا وجدت في الملف
             trimmed.startsWith("#EXTVLCOPT:http-referrer=") || trimmed.startsWith("#EXTVLCOPT:referer=") -> {
                 currentReferer = trimmed.substringAfter("=").trim()
             }
@@ -529,7 +563,6 @@ fun parseM3uContent(content: String): List<Channel> {
             trimmed.startsWith("#KODIPROP:inputstream.adaptive.license_key=") -> {
                 currentDrm = trimmed.substringAfter("=").trim()
             }
-            // عندما نصل لسطر الرابط (الذي يبدأ بـ http أو rtmp)
             !trimmed.startsWith("#") && (trimmed.startsWith("http") || trimmed.startsWith("rtmp")) -> {
                 channels.add(Channel(
                     name = currentName.ifEmpty { "قناة غير مسمى" },
@@ -540,7 +573,6 @@ fun parseM3uContent(content: String): List<Channel> {
                     userAgent = currentUserAgent,
                     group = currentGroup
                 ))
-                // تصفير المتغيرات استعداداً للقناة القادمة
                 currentName = ""; currentLogo = ""; currentGroup = ""; currentDrm = ""; currentReferer = ""; currentUserAgent = ""
             }
         }
@@ -549,7 +581,6 @@ fun parseM3uContent(content: String): List<Channel> {
 }
 fun decodeBase64Url(url: String): String {
     return try {
-        // نستخدم android.util.Base64 مباشرة لتجنب أي تعارض في الشاشة الرئيسية
         if (url.isNotEmpty() && url.matches(Regex("^[A-Za-z0-9+/=]+$"))) {
             val decodedBytes = android.util.Base64.decode(url, android.util.Base64.DEFAULT)
             String(decodedBytes)
@@ -583,8 +614,6 @@ fun isXtreamCodesUrl(url: String): Boolean {
 fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
     val cleanText = url.trim()
     val lowerText = cleanText.lowercase()
-
-    // 1. فحص وسوم M3U و DRM (إذا كان النص يحتوي على محتوى الملف نفسه وليس الرابط فقط)
     val m3uTags = listOf("#extinf", "#extvlcopt", "#extm3u", "http-drm-license", "inputstream.adaptive")
     if (m3uTags.any { lowerText.contains(it) }) return true
 
@@ -592,39 +621,22 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
     if (drmKeywords.any { lowerText.contains(it) }) return true
 
     val singleLineUrl = lowerText.replace("\n", " ").replace("\r", " ")
-
-    // 2. فحص روابط Xtream Codes و m3u_plus بشكل مباشر
-    // هذه الروابط يجب أن تعتبر دائماً "بث" ليتم معالجتها في loadChannels
     if (singleLineUrl.contains("get.php") ||
         singleLineUrl.contains("player_api.php") ||
         (singleLineUrl.contains("username=") && singleLineUrl.contains("password="))) {
         return true
     }
-
-    // 3. قائمة الامتدادات المعروفة
     val videoExtensions = listOf(
         "m3u8", "ts", "mpd", "m3u", "mp4", "mkv", "mov", "webm", "flv", "avi", "mpg", "mpeg", "ism"
     )
-
-    // نمط 1: فحص الامتدادات والمعاملات (مثل .m3u8 أو type=m3u)
     val extensionPattern = Regex("[.=](${videoExtensions.joinToString("|")})(&|$)").containsMatchIn(singleLineUrl)
-
-    // نمط 2: التقاط روابط Xtream الهيكلية (مثل /live/user/pass/123.ts)
     val xtreamPattern = Regex(".*/(live|movie|series)/.*|.*/[0-9]+(\\.(ts|m3u|m3u8))?$|[?&](t|type|f|format)=(live|ts|m3u8)").containsMatchIn(singleLineUrl)
 
     if (extensionPattern || xtreamPattern) return true
-
-    // 4. فحص الكلمات العامة في الرابط
     val generalKeywords = listOf("video", "stream", "playlist", "tvg-logo", "channellist", "link", "action=stream", "php?id=")
     if (generalKeywords.any { singleLineUrl.contains(it) }) return true
-
-// وأضف هذا التحقق الصريح لروابط الـ API المشابهة لرابطك
     if (singleLineUrl.contains("api/") && singleLineUrl.contains("action=")) return true
-
-    // البروتوكولات المباشرة
     if (singleLineUrl.startsWith("rtmp://") || singleLineUrl.startsWith("rtsp://")) return true
-
-    // 5. فحص الرأس (Header) - اختياري لتحقق أعمق
     if (checkHeader && singleLineUrl.startsWith("http") && !singleLineUrl.contains(" ")) {
         try {
             val connection = java.net.URL(cleanText).openConnection() as java.net.HttpURLConnection
@@ -644,8 +656,6 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
 fun extractMediaInfo(fullText: String): Map<String, String> {
     val info = mutableMapOf<String, String>()
     val lines = fullText.lines()
-
-    // وضع User-Agent افتراضي يتوافق مع VLC
     info["userAgent"] = "VLC/3.0.0 LibVLC/3.0.0"
 
     for (line in lines) {
