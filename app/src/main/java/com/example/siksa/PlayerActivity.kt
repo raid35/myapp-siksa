@@ -292,6 +292,16 @@ class PlayerActivity : AppCompatActivity() {
     private fun initializePlayer(url: String, drmKey: String, referer: String, userAgent: String) {
         player?.release()
 
+        // Validate stream URL
+        if (!StreamTypeConfig.isValidStreamUrl(url)) {
+            android.util.Log.e("PlayerActivity", "[v0] Invalid stream URL: $url")
+            return
+        }
+
+        // Detect stream type using professional configuration
+        val streamConfig = StreamTypeConfig.detectStreamType(url)
+        android.util.Log.d("PlayerActivity", "[v0] Detected stream type: ${streamConfig.type}, MIME: ${streamConfig.mimeType}")
+
         val bandwidthMeter = DefaultBandwidthMeter.Builder(this).build()
 
         val trackSelectionFactory = AdaptiveTrackSelection.Factory()
@@ -307,57 +317,61 @@ class PlayerActivity : AppCompatActivity() {
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             setEnableDecoderFallback(true)
         }
-        val customHeaders = mutableMapOf("Connection" to "keep-alive", "Accept" to "*/*")
+
+        // Build headers optimized for detected stream type
+        val customHeaders = mutableMapOf<String, String>()
+        customHeaders.putAll(StreamTypeConfig.getOptimalHeaders(streamConfig.type))
         if (referer.isNotEmpty()) customHeaders["Referer"] = referer
 
-        val finalUserAgent = when {
-            url.contains("dash") || url.contains(".mpd") ->
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            else -> userAgent.ifEmpty { "VLC/3.0.0" }
+        val finalUserAgent = userAgent.ifEmpty {
+            StreamTypeConfig.getOptimalUserAgent(streamConfig.type)
         }
 
-        val okHttpFactory = OkHttpDataSource.Factory(getUnsafeOkHttpClient())
+        // Build OkHttp client with timeout optimized for stream type
+        val okHttpFactory = OkHttpDataSource.Factory(getOptimizedHttpClient(streamConfig.type))
             .setUserAgent(finalUserAgent)
             .setDefaultRequestProperties(customHeaders)
 
         val dataSourceFactory = DefaultDataSource.Factory(this, okHttpFactory)
             .setTransferListener(bandwidthMeter)
 
-        val mediaItemBuilder = MediaItem.Builder().setUri(url.toUri())
-        url.lowercase().let { lowerUrl ->
-            when {
-                lowerUrl.contains(".m3u8") || lowerUrl.contains("#ext-x-stream-inf") ||
-                        (lowerUrl.contains(".php") && !lowerUrl.contains("extension=ts")) -> {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_M3U8)
-                }
-                lowerUrl.contains(".mpd") || lowerUrl.contains("dash") || lowerUrl.contains("manifest") -> {
-                    mediaItemBuilder.setMimeType(MimeTypes.APPLICATION_MPD)
-                }
-                lowerUrl.contains(".ts") || lowerUrl.contains("f=ts") || lowerUrl.contains("extension=ts") -> {
-                    mediaItemBuilder.setMimeType(MimeTypes.VIDEO_MP2T)
-                }
-            }
-        }
-        if (drmKey.isNotEmpty() && drmKey.contains(":")) {
+        // Set MIME type based on detected stream type
+        val mediaItemBuilder = MediaItem.Builder()
+            .setUri(url.toUri())
+            .setMimeType(streamConfig.mimeType)
+
+        // Configure DRM only if stream type requires it
+        if (streamConfig.isDrmRequired && drmKey.isNotEmpty()) {
             try {
-                val parts = drmKey.split(":")
-                if (parts.size >= 2) {
-                    val json = """{"keys":[{"kty":"oct","k":"${parts[1].trim()}","kid":"${parts[0].trim()}"}],"type":"temporary"}"""
-                    val base64Key = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                val drmConfig = parseClearKeyDRM(drmKey)
+                if (drmConfig != null) {
                     mediaItemBuilder.setDrmConfiguration(
                         MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
-                            .setLicenseUri("data:application/json;base64,$base64Key")
+                            .setLicenseUri(drmConfig)
                             .setMultiSession(true)
                             .setForceDefaultLicenseUri(true)
                             .build()
                     )
                 }
-            } catch (e: Exception) { e.printStackTrace() }
+            } catch (e: Exception) {
+                android.util.Log.d("PlayerActivity", "[v0] DRM parsing error: ${e.message}")
+                e.printStackTrace()
+            }
         }
+
+        // Create media source factory with appropriate error handling
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
+            .setLoadErrorHandlingPolicy(
+                when (streamConfig.type) {
+                    StreamTypeConfig.StreamType.DASH_MPD -> DashErrorHandlingPolicy()
+                    else -> errorHandlingPolicy
+                }
+            )
+
         player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(trackSelector)
             .setBandwidthMeter(bandwidthMeter)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory).setLoadErrorHandlingPolicy(errorHandlingPolicy))
+            .setMediaSourceFactory(mediaSourceFactory)
             .build().apply {
                 playerView.player = this
                 setMediaItem(mediaItemBuilder.build())
@@ -367,6 +381,53 @@ class PlayerActivity : AppCompatActivity() {
             }
 
         setupSubtitleStyle()
+    }
+
+    // Optimized HTTP client with timeout based on stream type
+    private fun getOptimizedHttpClient(streamType: StreamTypeConfig.StreamType): OkHttpClient {
+        val timeout = StreamTypeConfig.getOptimalTimeout(streamType)
+        val timeoutSeconds = timeout / 1000L
+        return getUnsafeOkHttpClient().newBuilder()
+            .connectTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
+            .writeTimeout(timeoutSeconds, java.util.concurrent.TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build()
+    }
+    private class DashErrorHandlingPolicy : DefaultLoadErrorHandlingPolicy() {
+        override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+            return when {
+                loadErrorInfo.exception is java.io.IOException &&
+                        loadErrorInfo.exception?.message?.contains("timeout") == true -> 2000L
+                loadErrorInfo.errorCount < 3 -> 1000L
+                else -> 5000L
+            }
+        }
+    }
+
+    private fun parseClearKeyDRM(drmKey: String): String? {
+        return try {
+            val trimmed = drmKey.trim()
+            if (trimmed.contains(":") && !trimmed.startsWith("{")) {
+                val parts = trimmed.split(":")
+                if (parts.size >= 2) {
+                    val kid = parts[0].trim()
+                    val k = parts[1].trim()
+                    val json = """{"keys":[{"kty":"oct","k":"$k","kid":"$kid"}],"type":"temporary"}"""
+                    val base64Key = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                    return "data:application/json;base64,$base64Key"
+                }
+            }
+            if (trimmed.startsWith("{")) {
+                val base64Key = Base64.encodeToString(trimmed.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                return "data:application/json;base64,$base64Key"
+            }
+
+            null
+        } catch (e: Exception) {
+            android.util.Log.d("PlayerActivity", "[v0] ClearKey DRM parse failed: ${e.message}")
+            null
+        }
     }
     private fun setupSubtitleStyle() {
         val isTelevision = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
@@ -380,15 +441,46 @@ class PlayerActivity : AppCompatActivity() {
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             bufferingHandler.removeCallbacks(bufferingRunnable)
-            if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) player?.seekToDefaultPosition()
-            player?.prepare()
+            android.util.Log.d("PlayerActivity", "[v0] PlaybackException Code: ${error.errorCode}, Message: ${error.message}")
+
+            when (error.errorCode) {
+                PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> {
+                    player?.seekToDefaultPosition()
+                    player?.prepare()
+                }
+                PlaybackException.ERROR_CODE_UNSPECIFIED,
+                PlaybackException.ERROR_CODE_REMOTE_ERROR,
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> {
+                    // Network/IO issues - retry with backoff
+                    bufferingHandler.postDelayed({
+                        player?.prepare()
+                    }, 3000)
+                }
+                PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> {
+                    // DASH manifest parsing failed - likely malformed MPD
+                    android.util.Log.e("PlayerActivity", "[v0] Manifest parsing failed: ${error.message}")
+                    player?.prepare()
+                }
+                else -> {
+                    player?.prepare()
+                }
+            }
         }
+
         override fun onPlaybackStateChanged(state: Int) {
             bufferingHandler.removeCallbacks(bufferingRunnable)
             when (state) {
-                Player.STATE_BUFFERING -> bufferingHandler.postDelayed(bufferingRunnable, 15000)
+                Player.STATE_BUFFERING -> {
+                    android.util.Log.d("PlayerActivity", "[v0] Buffering DASH content...")
+                    bufferingHandler.postDelayed(bufferingRunnable, 20000) // Increased timeout for DASH manifests
+                }
                 Player.STATE_IDLE -> player?.prepare()
                 Player.STATE_ENDED -> { player?.seekToDefaultPosition(); player?.prepare() }
+                Player.STATE_READY -> {
+                    android.util.Log.d("PlayerActivity", "[v0] Playback ready")
+                    bufferingHandler.removeCallbacks(bufferingRunnable)
+                }
                 else -> {}
             }
         }
@@ -479,8 +571,22 @@ class PlayerActivity : AppCompatActivity() {
                 override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
             })
             val sslContext = SSLContext.getInstance("SSL").apply { init(null, trustAllCerts, java.security.SecureRandom()) }
-            OkHttpClient.Builder().sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager).hostnameVerifier { _, _ -> true }.build()
-        } catch (_: Exception) { OkHttpClient() }
+            OkHttpClient.Builder()
+                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
+                .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        } catch (_: Exception) {
+            OkHttpClient.Builder()
+                .connectTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+                .retryOnConnectionFailure(true)
+                .build()
+        }
     }
 
     private fun applyImmersiveMode() {
