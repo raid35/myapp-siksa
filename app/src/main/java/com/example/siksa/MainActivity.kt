@@ -1,3 +1,4 @@
+
 package com.example.siksa
 
 import android.content.Intent
@@ -549,31 +550,48 @@ fun parseM3uContent(content: String): List<Channel> {
         if (trimmed.isEmpty()) continue
 
         when {
+            // 1. استخراج معلومات القناة الأساسية
             trimmed.startsWith("#EXTINF") -> {
                 currentName = trimmed.substringAfterLast(",").trim()
-                currentLogo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
-                currentGroup = Regex("""group-title=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
+                currentLogo = Regex("""tvg-logo=["']([^"']+)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
+                currentGroup = Regex("""group-title=["']([^"']+)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
             }
-            trimmed.startsWith("#EXTVLCOPT:http-referrer=") || trimmed.startsWith("#EXTVLCOPT:referer=") -> {
-                currentReferer = trimmed.substringAfter("=").trim()
-            }
-            trimmed.startsWith("#EXTVLCOPT:http-user-agent=") || trimmed.startsWith("#EXTVLCOPT:user-agent=") -> {
+
+            // 2. استخراج الـ User-Agent (يدعم الصيغتين: VLC و KODI)
+            trimmed.contains("user-agent=", ignoreCase = true) -> {
                 currentUserAgent = trimmed.substringAfter("=").trim()
             }
-            trimmed.startsWith("#KODIPROP:inputstream.adaptive.license_key=") -> {
+
+            // 3. استخراج الـ Referer
+            trimmed.contains("referer=", ignoreCase = true) || trimmed.contains("referrer=", ignoreCase = true) -> {
+                currentReferer = trimmed.substringAfter("=").trim()
+            }
+
+            // 4. استخراج مفتاح التشفير DRM (يدعم KODIPROP و EXTVLCOPT)
+            // سيلتقط license_key= أو http-drm-license=
+            trimmed.contains("license_key=", ignoreCase = true) ||
+                    trimmed.contains("http-drm-license=", ignoreCase = true) -> {
                 currentDrm = trimmed.substringAfter("=").trim()
             }
-            !trimmed.startsWith("#") && (trimmed.startsWith("http") || trimmed.startsWith("rtmp")) -> {
+
+            // 5. رابط البث (نهاية بيانات القناة الحالية)
+            trimmed.startsWith("http") || trimmed.startsWith("rtmp") -> {
+                // تنظيف الرابط من أي بارامترات ملحقة بـ |
+                val urlOnly = trimmed.substringBefore("|").trim()
+
                 channels.add(Channel(
                     name = currentName.ifEmpty { "قناة غير مسمى" },
-                    url = trimmed,
+                    url = urlOnly,
                     logo = currentLogo,
                     drmLicense = currentDrm,
                     referer = currentReferer,
                     userAgent = currentUserAgent,
                     group = currentGroup
                 ))
-                currentName = ""; currentLogo = ""; currentGroup = ""; currentDrm = ""; currentReferer = ""; currentUserAgent = ""
+
+                // إعادة تعيين المتغيرات للقناة التالية
+                currentName = ""; currentLogo = ""; currentGroup = "";
+                currentDrm = ""; currentReferer = ""; currentUserAgent = ""
             }
         }
     }
