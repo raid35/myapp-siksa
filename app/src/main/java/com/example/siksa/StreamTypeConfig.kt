@@ -23,7 +23,8 @@ object StreamTypeConfig {
         val mimeType: String,
         val isDrmRequired: Boolean = false,
         val needsSpecialHeaders: Boolean = false,
-        val optimizedTimeout: Long = 20000L
+        val optimizedTimeout: Long = 20000L,
+        val description: String = ""
     )
 
     /**
@@ -40,27 +41,31 @@ object StreamTypeConfig {
                 StreamConfig(
                     type = StreamType.HLS_M3U8,
                     mimeType = MimeTypes.APPLICATION_M3U8,
-                    optimizedTimeout = 20000L
+                    optimizedTimeout = 20000L,
+                    description = "HLS M3U8 Playlist"
                 )
             }
 
-            // MPD detection - explicit extension
+            // MPD detection - explicit extension (most reliable for DASH with DRM)
             lowerUrl.contains(".mpd") -> {
                 StreamConfig(
                     type = StreamType.DASH_MPD,
                     mimeType = MimeTypes.APPLICATION_MPD,
                     isDrmRequired = true,
-                    optimizedTimeout = 30000L
+                    optimizedTimeout = 30000L,
+                    description = "DASH MPD with DRM Support"
                 )
             }
 
             // TS/MPEG-TS segments
-            lowerUrl.contains(".ts") || lowerUrl.contains("extension=ts") ||
+            lowerUrl.contains(".ts") && !lowerUrl.contains(".mpd") ||
+                    lowerUrl.contains("extension=ts") ||
                     lowerUrl.contains("f=ts") -> {
                 StreamConfig(
                     type = StreamType.MPEG_TS,
                     mimeType = MimeTypes.VIDEO_MP2T,
-                    optimizedTimeout = 20000L
+                    optimizedTimeout = 20000L,
+                    description = "MPEG-TS Stream"
                 )
             }
 
@@ -70,15 +75,17 @@ object StreamTypeConfig {
                     type = StreamType.DASH_MPD,
                     mimeType = MimeTypes.APPLICATION_MPD,
                     isDrmRequired = true,
-                    optimizedTimeout = 30000L
+                    optimizedTimeout = 30000L,
+                    description = "DASH Path Detected"
                 )
             }
 
-            lowerUrl.contains("/hls/") || lowerUrl.contains("m3u") -> {
+            lowerUrl.contains("/hls/") || (lowerUrl.contains("m3u") && !lowerUrl.contains("mpd")) -> {
                 StreamConfig(
                     type = StreamType.HLS_M3U8,
                     mimeType = MimeTypes.APPLICATION_M3U8,
-                    optimizedTimeout = 20000L
+                    optimizedTimeout = 20000L,
+                    description = "HLS Path Detected"
                 )
             }
 
@@ -90,7 +97,8 @@ object StreamTypeConfig {
                 StreamConfig(
                     type = StreamType.HLS_M3U8,
                     mimeType = MimeTypes.APPLICATION_M3U8,
-                    optimizedTimeout = 20000L
+                    optimizedTimeout = 20000L,
+                    description = "HLS Manifest"
                 )
             }
 
@@ -100,17 +108,19 @@ object StreamTypeConfig {
                     type = StreamType.DASH_MPD,
                     mimeType = MimeTypes.APPLICATION_MPD,
                     isDrmRequired = true,
-                    optimizedTimeout = 30000L
+                    optimizedTimeout = 30000L,
+                    description = "DASH Manifest"
                 )
             }
 
             // Stage 4: Keyword-based detection (lowest priority)
-            lowerUrl.contains("dash") && !lowerUrl.contains("m3u8") -> {
+            (lowerUrl.contains("dash") && !lowerUrl.contains("m3u8")) || lowerUrl.contains("isml") -> {
                 StreamConfig(
                     type = StreamType.DASH_MPD,
                     mimeType = MimeTypes.APPLICATION_MPD,
                     isDrmRequired = true,
-                    optimizedTimeout = 30000L
+                    optimizedTimeout = 30000L,
+                    description = "DASH Stream (keyword detected)"
                 )
             }
 
@@ -118,7 +128,8 @@ object StreamTypeConfig {
                 StreamConfig(
                     type = StreamType.HLS_M3U8,
                     mimeType = MimeTypes.APPLICATION_M3U8,
-                    optimizedTimeout = 20000L
+                    optimizedTimeout = 20000L,
+                    description = "HLS Stream (keyword detected)"
                 )
             }
 
@@ -127,7 +138,8 @@ object StreamTypeConfig {
                 StreamConfig(
                     type = StreamType.HTTP_PROGRESSIVE,
                     mimeType = guessMimeTypeFromExtension(lowerUrl),
-                    optimizedTimeout = 20000L
+                    optimizedTimeout = 20000L,
+                    description = "Progressive HTTP Stream"
                 )
             }
         }
