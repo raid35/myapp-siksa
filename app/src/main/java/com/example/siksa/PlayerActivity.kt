@@ -65,8 +65,14 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private val errorHandlingPolicy = object : DefaultLoadErrorHandlingPolicy() {
-        override fun getMinimumLoadableRetryCount(dataType: Int): Int = Int.MAX_VALUE
-        override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long = 1000
+        override fun getMinimumLoadableRetryCount(dataType: Int): Int = 10
+        override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+            return when {
+                loadErrorInfo.errorCount < 2 -> 500L
+                loadErrorInfo.errorCount < 4 -> 1500L
+                else -> 3000L
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -352,9 +358,12 @@ class PlayerActivity : AppCompatActivity() {
                             .setForceDefaultLicenseUri(true)
                             .build()
                     )
+                    android.util.Log.d("PlayerActivity", "[v0] DRM Configuration applied successfully")
+                } else {
+                    android.util.Log.w("PlayerActivity", "[v0] DRM key provided but parsing failed")
                 }
             } catch (e: Exception) {
-                android.util.Log.d("PlayerActivity", "[v0] DRM parsing error: ${e.message}")
+                android.util.Log.e("PlayerActivity", "[v0] DRM configuration error: ${e.message}")
                 e.printStackTrace()
             }
         }
@@ -395,11 +404,14 @@ class PlayerActivity : AppCompatActivity() {
             .build()
     }
     private class DashErrorHandlingPolicy : DefaultLoadErrorHandlingPolicy() {
+        override fun getMinimumLoadableRetryCount(dataType: Int): Int = 8
         override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
             return when {
                 loadErrorInfo.exception is java.io.IOException &&
-                        loadErrorInfo.exception?.message?.contains("timeout") == true -> 2000L
-                loadErrorInfo.errorCount < 3 -> 1000L
+                        loadErrorInfo.exception?.message?.contains("timeout") == true -> 1500L
+                loadErrorInfo.errorCount < 2 -> 800L
+                loadErrorInfo.errorCount < 4 -> 1500L
+                loadErrorInfo.errorCount < 6 -> 3000L
                 else -> 5000L
             }
         }
@@ -408,6 +420,8 @@ class PlayerActivity : AppCompatActivity() {
     private fun parseClearKeyDRM(drmKey: String): String? {
         return try {
             val trimmed = drmKey.trim()
+
+            // Handle format: kid:key (hex:hex)
             if (trimmed.contains(":") && !trimmed.startsWith("{")) {
                 val parts = trimmed.split(":")
                 if (parts.size >= 2) {
@@ -415,17 +429,23 @@ class PlayerActivity : AppCompatActivity() {
                     val k = parts[1].trim()
                     val json = """{"keys":[{"kty":"oct","k":"$k","kid":"$kid"}],"type":"temporary"}"""
                     val base64Key = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                    android.util.Log.d("PlayerActivity", "[v0] DRM License prepared (hex:hex format)")
                     return "data:application/json;base64,$base64Key"
                 }
             }
+
+            // Handle JSON format
             if (trimmed.startsWith("{")) {
                 val base64Key = Base64.encodeToString(trimmed.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                android.util.Log.d("PlayerActivity", "[v0] DRM License prepared (JSON format)")
                 return "data:application/json;base64,$base64Key"
             }
 
+            android.util.Log.w("PlayerActivity", "[v0] Unknown DRM format: ${trimmed.take(50)}")
             null
         } catch (e: Exception) {
-            android.util.Log.d("PlayerActivity", "[v0] ClearKey DRM parse failed: ${e.message}")
+            android.util.Log.e("PlayerActivity", "[v0] ClearKey DRM parse failed: ${e.message}")
+            e.printStackTrace()
             null
         }
     }
@@ -441,10 +461,12 @@ class PlayerActivity : AppCompatActivity() {
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             bufferingHandler.removeCallbacks(bufferingRunnable)
-            android.util.Log.d("PlayerActivity", "[v0] PlaybackException Code: ${error.errorCode}, Message: ${error.message}")
+            android.util.Log.e("PlayerActivity", "[v0] PlaybackException Code: ${error.errorCode}, Message: ${error.message}")
+            error.printStackTrace()
 
             when (error.errorCode) {
                 PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> {
+                    android.util.Log.d("PlayerActivity", "[v0] Behind live window, seeking to default position")
                     player?.seekToDefaultPosition()
                     player?.prepare()
                 }
@@ -453,30 +475,44 @@ class PlayerActivity : AppCompatActivity() {
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
                 PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> {
                     // Network/IO issues - retry with backoff
+                    android.util.Log.d("PlayerActivity", "[v0] Network error, retrying in 2 seconds")
                     bufferingHandler.postDelayed({
                         player?.prepare()
-                    }, 3000)
+                    }, 2000)
                 }
                 PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> {
-                    // DASH manifest parsing failed - likely malformed MPD
-                    android.util.Log.e("PlayerActivity", "[v0] Manifest parsing failed: ${error.message}")
-                    player?.prepare()
+                    // DASH manifest parsing failed - try again
+                    android.util.Log.e("PlayerActivity", "[v0] Manifest parsing failed, retrying...")
+                    bufferingHandler.postDelayed({
+                        player?.prepare()
+                    }, 1500)
                 }
                 else -> {
-                    player?.prepare()
+                    android.util.Log.d("PlayerActivity", "[v0] Other error, retrying playback")
+                    bufferingHandler.postDelayed({
+                        player?.prepare()
+                    }, 1000)
                 }
             }
         }
 
         override fun onPlaybackStateChanged(state: Int) {
-            bufferingHandler.removeCallbacks(bufferingRunnable)
             when (state) {
                 Player.STATE_BUFFERING -> {
-                    android.util.Log.d("PlayerActivity", "[v0] Buffering DASH content...")
-                    bufferingHandler.postDelayed(bufferingRunnable, 20000) // Increased timeout for DASH manifests
+                    android.util.Log.d("PlayerActivity", "[v0] Buffering content...")
+                    bufferingHandler.removeCallbacks(bufferingRunnable)
+                    // Only timeout if buffering takes too long
+                    bufferingHandler.postDelayed(bufferingRunnable, 30000)
                 }
-                Player.STATE_IDLE -> player?.prepare()
-                Player.STATE_ENDED -> { player?.seekToDefaultPosition(); player?.prepare() }
+                Player.STATE_IDLE -> {
+                    android.util.Log.d("PlayerActivity", "[v0] Player idle, preparing...")
+                    player?.prepare()
+                }
+                Player.STATE_ENDED -> {
+                    android.util.Log.d("PlayerActivity", "[v0] Playback ended, restarting...")
+                    player?.seekToDefaultPosition()
+                    player?.prepare()
+                }
                 Player.STATE_READY -> {
                     android.util.Log.d("PlayerActivity", "[v0] Playback ready")
                     bufferingHandler.removeCallbacks(bufferingRunnable)
