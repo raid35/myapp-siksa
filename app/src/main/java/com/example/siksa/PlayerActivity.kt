@@ -91,22 +91,38 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun handleIncomingIntent(intent: Intent) {
         val dataUri = intent.data
+
+        // الحالة الأولى: تشغيل رابط مباشر (من خارج التطبيق أو Deep Link)
         if (dataUri != null) {
             val fullUrl = dataUri.toString()
-            if (fullUrl.contains("|")) {
-                val mediaInfo = extractMediaInfo(fullUrl)
-                val urlToPlay = mediaInfo["url"] ?: ""
-                val userAgent = mediaInfo["userAgent"] ?: "VLC/3.0.0"
-                val referer = mediaInfo["referer"] ?: ""
-                val drmLicense = mediaInfo["drm"] ?: ""
-                initializePlayer(urlToPlay, drmLicense, referer, userAgent)
+            val mediaInfo = extractMediaInfo(fullUrl)
+
+            initializePlayer(
+                mediaInfo["url"] ?: "",
+                mediaInfo["drm"] ?: "",
+                mediaInfo["referer"] ?: "",
+                mediaInfo["userAgent"] ?: "VLC/3.0.0"
+            )
+        }
+        // الحالة الثانية: التشغيل من داخل التطبيق (الوضع الطبيعي)
+        else {
+            // نستخدم المستودع الثابت ChannelData لجلب القنوات (يمنع الانهيار للقوائم الكبيرة)
+            val savedList = ChannelData.list
+
+            if (savedList.isNotEmpty()) {
+                // استخدام الدالة التي أنشأناها في ملف Channel.kt لتحويل البيانات تلقائياً
+                // ستقوم بفك تشفير Base64 للروابط المشفرة وترك روابط Xtream كما هي
+                channelsList = ArrayList(savedList.map { it.toPlayerString() })
+
+                // جلب ترتيب القناة التي ضغطت عليها في الواجهة
+                currentChannelIndex = intent.getIntExtra("channelIndex", 0)
+
+                // بدء التشغيل
+                loadChannelData()
             } else {
-                initializePlayer(fullUrl, "", "", "VLC/3.0.0")
+                // خيار احتياطي في حال ضاعت القائمة من الذاكرة (مثلاً عند استعادة النشاط)
+                processImmediatePlayback()
             }
-        } else {
-            channelsList = intent.getStringArrayListExtra("channelsList")
-            currentChannelIndex = intent.getIntExtra("channelIndex", 0)
-            loadChannelData()
         }
     }
 
