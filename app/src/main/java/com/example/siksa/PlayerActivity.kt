@@ -233,6 +233,140 @@ class PlayerActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Load channels from JSON with base64-encoded URLs and ClearKey DRM support
+     */
+    @Suppress("unused")
+    suspend fun loadChannelsFromJson(url: String): List<Channel> {
+        return withContext(Dispatchers.IO) {
+            try {
+                val client = OkHttpClient()
+                val realUrl = decodeBase64Url(url)
+
+                val request = Request.Builder()
+                    .url(realUrl)
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext emptyList()
+
+                    val content = response.body?.string()?.trim() ?: ""
+                    val channels = mutableListOf<Channel>()
+
+                    try {
+                        // Simple JSON parsing without external dependencies
+                        val items = parseSimpleJsonArray(content)
+                        items.forEach { item ->
+                            val name = extractJsonValue(item, "name")
+                            val encodedUrl = extractJsonValue(item, "url")
+                            val logo = extractJsonValue(item, "logo")
+                            val drmLicense = extractJsonValue(item, "drmLicense")
+                            val group = extractJsonValue(item, "group")
+
+                            // Decode base64 URL - it may contain DRM info
+                            val decodedUrl = try {
+                                String(Base64.decode(encodedUrl, Base64.URL_SAFE or Base64.DEFAULT))
+                            } catch (e: Exception) {
+                                encodedUrl // Use as-is if decoding fails
+                            }
+
+                            // Extract DRM info from URL if present (format: url|drm-info=clearkey|kid:key)
+                            var finalUrl = decodedUrl
+                            var extractedDrm = drmLicense
+
+                            if (decodedUrl.contains("|drm-info=clearkey")) {
+                                val parts = decodedUrl.split("|")
+                                finalUrl = parts[0]
+
+                                // Extract DRM from the remaining parts
+                                parts.forEach { part ->
+                                    if (part.startsWith("drm-info=clearkey")) {
+                                        extractedDrm = part.substringAfter("drm-info=clearkey|")
+                                        android.util.Log.d("PlayerActivity", "[v0] Extracted ClearKey from JSON URL: ${extractedDrm.take(20)}...")
+                                    }
+                                }
+                            }
+
+                            if (finalUrl.isNotEmpty() && (finalUrl.startsWith("http") || finalUrl.startsWith("rtmp"))) {
+                                channels.add(
+                                    Channel(
+                                        name = name,
+                                        url = finalUrl,
+                                        logo = logo,
+                                        drmLicense = extractedDrm,
+                                        referer = "",
+                                        userAgent = "",
+                                        group = group
+                                    )
+                                )
+                                android.util.Log.d("PlayerActivity", "[v0] Added JSON channel: $name with DRM: ${extractedDrm.isNotEmpty()}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("PlayerActivity", "[v0] JSON parsing error: ${e.message}")
+                    }
+
+                    channels
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PlayerActivity", "[v0] Error loading JSON channels: ${e.message}")
+                emptyList()
+            }
+        }
+    }
+
+    /**
+     * Simple JSON array parser without external dependencies
+     */
+    private fun parseSimpleJsonArray(json: String): List<String> {
+        val result = mutableListOf<String>()
+        var current = StringBuilder()
+        var depth = 0
+        var inString = false
+        var escapeNext = false
+
+        json.forEach { char ->
+            when {
+                escapeNext -> {
+                    current.append(char)
+                    escapeNext = false
+                }
+                char == '\\' && inString -> {
+                    current.append(char)
+                    escapeNext = true
+                }
+                char == '"' -> {
+                    inString = !inString
+                    current.append(char)
+                }
+                char == '{' && !inString -> {
+                    depth++
+                    current.append(char)
+                }
+                char == '}' && !inString -> {
+                    depth--
+                    current.append(char)
+                    if (depth == 0) {
+                        result.add(current.toString())
+                        current = StringBuilder()
+                    }
+                }
+                else -> current.append(char)
+            }
+        }
+
+        return result
+    }
+
+    /**
+     * Extract value from simple JSON object
+     */
+    private fun extractJsonValue(json: String, key: String): String {
+        val pattern = """"$key"\s*:\s*"([^"]*)"""".toRegex()
+        return pattern.find(json)?.groupValues?.get(1) ?: ""
+    }
+
     @Suppress("unused")
     suspend fun loadChannels(url: String): List<Channel> {
         return withContext(Dispatchers.IO) {
@@ -256,6 +390,7 @@ class PlayerActivity : AppCompatActivity() {
                     var currentDrm = ""
                     var currentReferer = ""
                     var currentUserAgent = ""
+                    var currentLicenseType = ""  // Store license type (e.g., "clearkey")
 
                     content.lines().forEach { line ->
                         val trimmed = line.trim()
@@ -266,16 +401,30 @@ class PlayerActivity : AppCompatActivity() {
                                     currentLogo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
                                     currentGroup = Regex("""group-title=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1) ?: ""
                                 }
+                                // Extract license type (clearkey, widevine, playready, etc.)
+                                trimmed.contains("inputstream.adaptive.license_type=") -> {
+                                    currentLicenseType = trimmed.substringAfter("license_type=").trim().lowercase()
+                                    android.util.Log.d("PlayerActivity", "[v0] License Type Detected: $currentLicenseType")
+                                }
+                                // Extract DRM license key (ClearKey format)
+                                trimmed.contains("inputstream.adaptive.license_key=") -> {
+                                    currentDrm = trimmed.substringAfter("license_key=").trim()
+                                    android.util.Log.d("PlayerActivity", "[v0] DRM License Key Detected: ${currentDrm.take(20)}...")
+                                }
+                                trimmed.contains("license_key=") && !trimmed.contains("inputstream") -> {
+                                    currentDrm = trimmed.substringAfter("=").trim()
+                                }
                                 trimmed.lowercase().contains("referer") || trimmed.lowercase().contains("referrer") -> {
                                     currentReferer = trimmed.substringAfter("=").trim()
                                 }
                                 trimmed.lowercase().contains("user-agent") -> {
                                     currentUserAgent = trimmed.substringAfter("=").trim()
                                 }
-                                trimmed.contains("license_key=") || trimmed.contains("inputstream.adaptive.license_key=") -> {
-                                    currentDrm = trimmed.substringAfter("=").trim()
-                                }
                                 !trimmed.startsWith("#") && (trimmed.startsWith("http") || trimmed.startsWith("rtmp")) -> {
+                                    // Ensure DRM is set for streaming URLs if license type is clearkey
+                                    if (currentLicenseType.contains("clearkey") && currentDrm.isNotEmpty()) {
+                                        android.util.Log.d("PlayerActivity", "[v0] Adding channel with ClearKey: $currentName")
+                                    }
                                     channels.add(
                                         Channel(
                                             name = currentName,
@@ -287,14 +436,15 @@ class PlayerActivity : AppCompatActivity() {
                                             group = currentGroup
                                         )
                                     )
-                                    currentName = ""; currentLogo = ""; currentGroup = ""; currentDrm = ""; currentReferer = ""; currentUserAgent = ""
+                                    currentName = ""; currentLogo = ""; currentGroup = ""; currentDrm = ""; currentReferer = ""; currentUserAgent = ""; currentLicenseType = ""
                                 }
                             }
                         }
                     }
                     channels
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.e("PlayerActivity", "[v0] Error loading channels: ${e.message}")
                 emptyList()
             }
         }
@@ -437,32 +587,98 @@ class PlayerActivity : AppCompatActivity() {
         return try {
             val trimmed = drmKey.trim()
 
-            // Handle format: kid:key (hex:hex)
+            android.util.Log.d("PlayerActivity", "[v0] Parsing DRM Key - Format: ${if (trimmed.contains(":")) "hex:hex" else if (trimmed.startsWith("{")) "JSON" else "Unknown"}")
+
+            // ===== Handle format: kid:key (hex:hex) =====
             if (trimmed.contains(":") && !trimmed.startsWith("{")) {
-                val parts = trimmed.split(":")
-                if (parts.size >= 2) {
+                val parts = trimmed.split(":", limit = 2)
+                if (parts.size == 2) {
                     val kid = parts[0].trim()
                     val k = parts[1].trim()
-                    val json = """{"keys":[{"kty":"oct","k":"$k","kid":"$kid"}],"type":"temporary"}"""
-                    val base64Key = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-                    android.util.Log.d("PlayerActivity", "[v0] DRM License prepared (hex:hex format)")
-                    return "data:application/json;base64,$base64Key"
+
+                    // Validate hex format
+                    if (!isValidHex(kid) || !isValidHex(k)) {
+                        android.util.Log.e("PlayerActivity", "[v0] Invalid hex in DRM key: kid=$kid, k=$k")
+                        return null
+                    }
+
+                    // Build ClearKey JSON: the key must be base64url encoded
+                    val base64EncodedKey = Base64.encodeToString(hexStringToByteArray(k), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                    val base64EncodedKid = Base64.encodeToString(hexStringToByteArray(kid), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+
+                    val json = """{"keys":[{"kty":"oct","k":"$base64EncodedKey","kid":"$base64EncodedKid"}],"type":"temporary"}"""
+                    val base64License = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+
+                    android.util.Log.d("PlayerActivity", "[v0] ✓ ClearKey DRM prepared (hex:hex format) - License URI created")
+                    return "data:application/json;base64,$base64License"
                 }
             }
 
-            // Handle JSON format
+            // ===== Handle JSON format =====
             if (trimmed.startsWith("{")) {
-                val base64Key = Base64.encodeToString(trimmed.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-                android.util.Log.d("PlayerActivity", "[v0] DRM License prepared (JSON format)")
-                return "data:application/json;base64,$base64Key"
+                val base64License = Base64.encodeToString(trimmed.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                android.util.Log.d("PlayerActivity", "[v0] ✓ ClearKey DRM prepared (JSON format) - License URI created")
+                return "data:application/json;base64,$base64License"
             }
 
-            android.util.Log.w("PlayerActivity", "[v0] Unknown DRM format: ${trimmed.take(50)}")
+            // ===== Handle base64-encoded URL with DRM info =====
+            if (isBase64(trimmed)) {
+                try {
+                    val decoded = String(Base64.decode(trimmed, Base64.URL_SAFE or Base64.DEFAULT))
+
+                    // Check if decoded string contains DRM info (like drm-info=clearkey|kid:key)
+                    if (decoded.contains("drm-info=clearkey") && decoded.contains("|")) {
+                        val drmPart = decoded.substringAfter("drm-info=clearkey|").split("&").firstOrNull() ?: ""
+                        if (drmPart.contains(":")) {
+                            android.util.Log.d("PlayerActivity", "[v0] Extracting DRM from base64 URL: $drmPart")
+                            // Recursively parse the extracted DRM key
+                            return parseClearKeyDRM(drmPart)
+                        }
+                    }
+
+                    android.util.Log.d("PlayerActivity", "[v0] Base64 URL decoded, no DRM info found inside")
+                } catch (e: Exception) {
+                    android.util.Log.d("PlayerActivity", "[v0] Failed to decode base64 for DRM extraction: ${e.message}")
+                }
+            }
+
+            android.util.Log.w("PlayerActivity", "[v0] ⚠ Unknown DRM format: ${trimmed.take(50)}")
             null
         } catch (e: Exception) {
-            android.util.Log.e("PlayerActivity", "[v0] ClearKey DRM parse failed: ${e.message}")
+            android.util.Log.e("PlayerActivity", "[v0] ✗ ClearKey DRM parse failed: ${e.message}")
             e.printStackTrace()
             null
+        }
+    }
+
+    /**
+     * Convert hex string to byte array
+     */
+    private fun hexStringToByteArray(s: String): ByteArray {
+        val len = s.length
+        val data = ByteArray(len / 2)
+        for (i in 0 until len step 2) {
+            data[i / 2] = ((s[i].toString().toInt(16) shl 4) + s[i + 1].toString().toInt(16)).toByte()
+        }
+        return data
+    }
+
+    /**
+     * Validate if string is valid hexadecimal
+     */
+    private fun isValidHex(s: String): Boolean {
+        return s.matches(Regex("[0-9a-fA-F]+"))
+    }
+
+    /**
+     * Check if string is base64 encoded
+     */
+    private fun isBase64(s: String): Boolean {
+        return try {
+            Base64.decode(s, Base64.URL_SAFE or Base64.DEFAULT)
+            true
+        } catch (e: Exception) {
+            false
         }
     }
     private fun setupSubtitleStyle() {
