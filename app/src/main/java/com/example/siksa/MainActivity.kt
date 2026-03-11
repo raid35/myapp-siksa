@@ -354,24 +354,23 @@ fun ChannelListScreen(
                             .focusable()
                             .clickable {
                                 onChannelClick(actualIndex)
-                                val allUrls = ArrayList<String>()
-                                channels.forEach { ch ->
-                                    val decodedUrl = decodeBase64Url(ch.url)
-                                    val line = "$decodedUrl|drm=${ch.drmLicense}|userAgent=${ch.userAgent}|referer=${ch.referer}"
-                                    allUrls.add(line)
-                                }
+
+                                // 1. حفظ القائمة كاملة في الذاكرة (Repository)
+                                // هذا يحل مشكلة الانهيار تماماً لأننا لا نرسلها عبر الـ Intent
+                                ChannelData.list = channels
 
                                 val currentChannel = channels[actualIndex]
                                 val realUrl = decodeBase64Url(currentChannel.url)
 
                                 if (isVideoStream(realUrl)) {
                                     val intent = Intent(context, PlayerActivity::class.java).apply {
-                                        putStringArrayListExtra("channelsList", allUrls)
+                                        // نرسل فقط البيانات الضرورية جداً
                                         putExtra("channelIndex", actualIndex)
                                         putExtra("streamUrl", realUrl)
                                         putExtra("drmLicense", currentChannel.drmLicense)
                                         putExtra("referer", currentChannel.referer)
                                         putExtra("userAgent", currentChannel.userAgent.ifEmpty { "Mozilla/5.0" })
+                                        // ملاحظة: لم نضع channelsList هنا لمنع الانهيار
                                     }
                                     context.startActivity(intent)
                                 } else {
@@ -441,9 +440,28 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
             if (!response.isSuccessful) return@withContext emptyList()
 
             val content = response.body?.string() ?: ""
-            val lines = content.lines()
-
             val packages = mutableListOf<PackageItem>()
+
+            // --- إضافة التحقق من JSON هنا ---
+            if (content.trim().startsWith("[") || content.trim().startsWith("{")) {
+                try {
+                    val jsonArray = org.json.JSONArray(content)
+                    for (i in 0 until jsonArray.length()) {
+                        val obj = jsonArray.getJSONObject(i)
+                        packages.add(PackageItem(
+                            name = obj.optString("name", "Package ${i + 1}"),
+                            logo = obj.optString("logo", ""),
+                            url = obj.optString("url", "")
+                        ))
+                    }
+                    return@withContext packages // إرجاع القائمة فوراً إذا نجح تحليل JSON
+                } catch (e: Exception) {
+                    // إذا فشل كـ JSON، سيحاول إكماله كـ M3U بالأسفل
+                }
+            }
+
+            // --- الكود الأصلي الخاص بـ M3U (بدون تغيير الهيكل) ---
+            val lines = content.lines()
             var name = ""
             var logo = ""
 
@@ -454,7 +472,6 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
                 if (trimmed.startsWith("#EXTINF")) {
                     name = trimmed.substringAfterLast(",").trim()
                     logo = Regex("""tvg-logo=["'](.*?)["']""").find(trimmed)?.groupValues?.get(1)?.trim() ?: ""
-
                 } else if (trimmed.startsWith("http") && !trimmed.startsWith("#")) {
                     packages.add(PackageItem(
                         name = name.ifEmpty { "Package ${packages.size + 1}" },
@@ -475,25 +492,59 @@ suspend fun loadPackagesFromM3u(url: String): List<PackageItem> {
 suspend fun loadChannels(url: String): List<Channel> {
     return withContext(Dispatchers.IO) {
         val realUrl = decodeBase64Url(url)
-        if (isMacPortalUrl(realUrl) || realUrl.contains("portal.php")) {
-            return@withContext loadStalkerPortal(realUrl, "00:1A:79:34:62:66")
-        }
+
+        // 1. دعم Stalker و Xtream كما فعلنا سابقاً
+        if (isMacPortalUrl(realUrl)) return@withContext loadStalkerPortal(realUrl, "00:1A:79:34:62:66")
+        if (isXtreamCodesUrl(realUrl)) return@withContext loadXtreamChannels(realUrl)
+
         try {
             val client = OkHttpClient()
-            val request = Request.Builder()
-                .url(realUrl)
-                .header("User-Agent", "Mozilla/5.0")
-                .build()
+            val request = Request.Builder().url(realUrl).header("User-Agent", "Mozilla/5.0").build()
 
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return@withContext emptyList()
                 val content = response.body?.string() ?: ""
-                return@withContext parseM3uContent(content)
+
+                // --- التعديل الجوهري هنا ---
+                val trimmedContent = content.trim()
+                if (trimmedContent.startsWith("{")) {
+                    // إذا كان المحتوى JSON، نستخدم دالة تحليل الـ JSON
+                    return@withContext parseJsonContent(trimmedContent)
+                } else {
+                    // إذا كان M3U عادي
+                    return@withContext parseM3uContent(trimmedContent)
+                }
             }
         } catch (e: Exception) {
             emptyList()
         }
     }
+}
+fun parseJsonContent(jsonString: String): List<Channel> {
+    val channels = mutableListOf<Channel>()
+    try {
+        val root = org.json.JSONObject(jsonString)
+        val jsonArray = root.getJSONArray("channels")
+
+        for (i in 0 until jsonArray.length()) {
+            val obj = jsonArray.getJSONObject(i)
+
+            // استخراج البيانات مع فك تشفير Base64 للرابط إذا لزم الأمر
+            val rawUrl = obj.optString("url")
+            val decodedUrl = decodeBase64Url(rawUrl) // فك التشفير للروابط المشفرة في الـ JSON
+
+            channels.add(Channel(
+                name = obj.optString("name"),
+                url = decodedUrl,
+                logo = obj.optString("logo"),
+                drmLicense = obj.optString("drmLicense"),
+                group = obj.optString("group")
+            ))
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return channels
 }
 suspend fun loadStalkerPortal(baseUrl: String, mac: String): List<Channel> {
     val client = OkHttpClient()
@@ -671,35 +722,48 @@ fun isVideoStream(url: String, checkHeader: Boolean = false): Boolean {
 
     return false
 }
-fun extractMediaInfo(fullText: String): Map<String, String> {
-    val info = mutableMapOf<String, String>()
-    val lines = fullText.lines()
-    info["userAgent"] = "VLC/3.0.0 LibVLC/3.0.0"
+suspend fun loadXtreamChannels(baseUrl: String): List<Channel> {
+    return withContext(Dispatchers.IO) {
+        val channels = mutableListOf<Channel>()
+        val client = OkHttpClient()
 
-    for (line in lines) {
-        val trimmed = line.trim()
-        val lower = trimmed.lowercase()
+        // بناء رابط الـ API لجلب القنوات المباشرة
+        val apiUrl = if (baseUrl.contains("player_api.php")) {
+            if (baseUrl.contains("action=get_live_streams")) baseUrl
+            else "$baseUrl&action=get_live_streams"
+        } else {
+            // إذا كان الرابط ينتهي بـ / فقط
+            "${baseUrl.removeSuffix("/")}/player_api.php?action=get_live_streams"
+        }
 
-        when {
-            trimmed.startsWith("http") -> {
-                if (trimmed.contains("|")) {
-                    val parts = trimmed.split("|")
-                    info["url"] = parts[0].trim()
-                    parts.forEach { part ->
-                        val pLower = part.lowercase()
-                        if (pLower.contains("user-agent="))
-                            info["userAgent"] = part.substringAfter("=").trim()
-                        if (pLower.contains("referer="))
-                            info["referer"] = part.substringAfter("=").trim()
-                    }
-                } else {
-                    info["url"] = trimmed
+        try {
+            val request = Request.Builder().url(apiUrl).build()
+            client.newCall(request).execute().use { response ->
+                val jsonResponse = response.body?.string() ?: ""
+                val jsonArray = org.json.JSONArray(jsonResponse)
+
+                // استخراج اليوزر والباسورد والسيرفر لتركيب روابط البث
+                val user = Regex("username=([^&]+)").find(baseUrl)?.groupValues?.get(1) ?: ""
+                val pass = Regex("password=([^&]+)").find(baseUrl)?.groupValues?.get(1) ?: ""
+                val server = baseUrl.substringBefore("/player_api.php")
+
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    val streamId = obj.optString("stream_id")
+
+                    // Xtream يستخدم عادة تنسيق: /live/user/pass/id.ts
+                    val streamUrl = "$server/live/$user/$pass/$streamId.ts"
+
+                    channels.add(Channel(
+                        name = obj.optString("name"),
+                        url = streamUrl,
+                        logo = obj.optString("stream_icon"),
+                        group = obj.optString("category_id")
+                    ))
                 }
             }
-            lower.contains("http-user-agent=") -> info["userAgent"] = trimmed.substringAfter("=").trim()
-            lower.contains("http-referrer=") || lower.contains("http-referer=") -> info["referer"] = trimmed.substringAfter("=").trim()
-            lower.contains("http-drm-license=") -> info["drm"] = trimmed.substringAfter("=").trim()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
+        channels
     }
-    return info
 }
+
