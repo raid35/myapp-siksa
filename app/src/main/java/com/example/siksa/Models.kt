@@ -4,6 +4,11 @@ import android.os.Parcelable
 import android.util.Base64
 import kotlinx.parcelize.Parcelize
 
+// 1. كائن لتخزين القنوات في الذاكرة لمنع الانهيار (Crash) في القوائم الكبيرة
+object ChannelData {
+    var list: List<Channel> = emptyList()
+}
+
 @Parcelize
 data class Channel(
     val name: String,
@@ -15,10 +20,18 @@ data class Channel(
     val group: String = ""
 ) : Parcelable
 
-// 👈 تضع الدالة هنا (خارج الكلاس ولكن في نفس الملف)
+@Parcelize
+data class PackageItem(
+    val name: String,
+    val logo: String,
+    val url: String
+) : Parcelable
+
+// 2. دالة تحويل احترافية تعالج الروابط وتجهزها للمشغل
 fun Channel.toPlayerString(): String {
     val realUrl = try {
-        if (url.isNotEmpty() && !url.startsWith("http")) {
+        // فك التشفير فقط إذا لم يبدأ بـ http وكان طوله مناسباً
+        if (url.isNotEmpty() && !url.startsWith("http") && url.length > 10) {
             String(Base64.decode(url, Base64.DEFAULT))
         } else {
             url
@@ -27,24 +40,15 @@ fun Channel.toPlayerString(): String {
         url
     }
 
-    val builder = StringBuilder(realUrl)
+    // بناء النص بالصيغة: URL|drm=...&userAgent=...
     val params = mutableListOf<String>()
-
-    if (drmLicense.isNotEmpty()) params.add("drmLicense=$drmLicense")
+    if (drmLicense.isNotEmpty()) params.add("drm=$drmLicense")
     if (referer.isNotEmpty()) params.add("referer=$referer")
     if (userAgent.isNotEmpty()) params.add("userAgent=$userAgent")
 
     return if (params.isNotEmpty()) {
-        builder.append("|").append(params.joinToString("&")).toString()
+        "$realUrl|${params.joinToString("|")}"
     } else {
-        builder.toString()
+        realUrl
     }
 }
-
-// إذا كان لديك كلاس PackageItem ضعه هنا أيضاً
-@Parcelize
-data class PackageItem(
-    val name: String,
-    val logo: String,
-    val url: String
-) : Parcelable
