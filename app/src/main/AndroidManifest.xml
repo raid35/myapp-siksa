@@ -3,9 +3,15 @@
     xmlns:tools="http://schemas.android.com/tools"
     package="com.example.siksa">
 
-    <uses-feature android:name="android.software.leanback" android:required="false" />
-    <uses-feature android:name="android.hardware.type.television" android:required="false" />
-    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.type.television"
+        android:required="false" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -13,19 +19,24 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
 
     <application
         android:allowBackup="true"
-        android:icon="@mipmap/siksa_icon"
-        android:label="@string/app_name"
-        android:theme="@style/Theme.Siksa"
+        android:banner="@mipmap/s_icon"
         android:hardwareAccelerated="true"
+        android:icon="@mipmap/s_icon"
+        android:roundIcon="@mipmap/s_icon"
+        android:label="@string/app_name"
         android:largeHeap="true"
+        android:theme="@style/Theme.Siksa"
         android:usesCleartextTraffic="true"
-        android:banner="@mipmap/siksa_icon"
-        tools:targetApi="n"
-        tools:ignore="UnusedResources,MissingTvBanner,SelectedPhotoAccess,LockedOrientationActivity,ForegroundServiceDeclaration,MissingRegistration,GoogleAppIndexingWarning,DataExtractionRules">
+        android:requestLegacyExternalStorage="true"
+        android:isGame="false"
 
+        tools:ignore="UnusedResources,MissingTvBanner,SelectedPhotoAccess,LockedOrientationActivity,ForegroundServiceDeclaration,MissingRegistration,GoogleAppIndexingWarning,DataExtractionRules"
+        tools:targetApi="n">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -33,40 +44,48 @@
             tools:ignore="LockedOrientationActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
+
                 <category android:name="android.intent.category.LAUNCHER" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
-
         <activity
             android:name=".PlayerActivity"
+            android:configChanges="smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTask"
-            android:supportsPictureInPicture="true"
-            android:configChanges="smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden">
+            android:supportsPictureInPicture="true">
 
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+
                 <data android:scheme="intent" />
                 <data android:scheme="servers" />
                 <data android:scheme="xmtv" />
+
+                <data android:mimeType="video/*" />
+                <data android:mimeType="application/dash+xml" />
+                <data android:mimeType="application/x-mpegurl" />
+                <data android:mimeType="application/vnd.apple.mpegurl" />
             </intent-filter>
 
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+
                 <data android:scheme="http" />
                 <data android:scheme="https" />
                 <data android:scheme="file" />
                 <data android:scheme="content" />
+
                 <data android:mimeType="video/*" />
                 <data android:mimeType="audio/*" />
+                <data android:mimeType="application/dash+xml" />
                 <data android:mimeType="application/x-mpegurl" />
                 <data android:mimeType="application/vnd.apple.mpegurl" />
-                <data android:mimeType="application/dash+xml" />
             </intent-filter>
 
             <intent-filter android:autoVerify="true">
@@ -78,16 +97,17 @@
                 <data android:host="siksa.app" />
             </intent-filter>
         </activity>
-
         <activity
             android:name=".WebViewActivity"
+            android:configChanges="smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden"
             android:exported="true"
-            android:launchMode="singleTask"
-            android:configChanges="smallestScreenSize|screenSize|uiMode|screenLayout|orientation|keyboardHidden">
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
+
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+
                 <data android:scheme="xmtv-browser" />
                 <data android:scheme="xmtv-iframe" />
                 <data android:scheme="xmtv-m3u" />
@@ -103,6 +123,7 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
-
     </application>
+
 </manifest>
+
