@@ -29,7 +29,6 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
-import androidx.media3.ui.CaptionStyleCompat
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import android.content.Intent
@@ -38,11 +37,13 @@ import android.graphics.drawable.GradientDrawable
 import androidx.core.graphics.toColorInt
 import androidx.media3.exoplayer.trackselection.AdaptiveTrackSelection
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
+import androidx.media3.extractor.DefaultExtractorsFactory
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory
+import com.example.siksa.SecurityUtils
 
 
 @OptIn(UnstableApi::class)
 class PlayerActivity : AppCompatActivity() {
-
     private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
     private var channelsList: ArrayList<String>? = null
@@ -74,12 +75,26 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (SecurityUtils.isSecurityRiskDetected(this)) {
+            android.widget.Toast.makeText(
+                this,
+                "عذراً، لا يمكن التشغيل بوجود تطبيقات VPN أو أدوات تحليل الشبكة أو Root",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+
+            finish()
+            return
+        }
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         applyImmersiveMode()
         setupUI()
         handleIncomingIntent(intent)
     }
-
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updatePlayerViewMode()
+        applyImmersiveMode()
+    }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -168,8 +183,14 @@ class PlayerActivity : AppCompatActivity() {
             )
             setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             useController = false
-            resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+
+            resizeMode = if (resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+                AspectRatioFrameLayout.RESIZE_MODE_FILL
+            } else {
+                AspectRatioFrameLayout.RESIZE_MODE_FIT
+            }
         }
+
         rootLayout.addView(playerView)
         btnPrev = createControlBtn(android.R.drawable.ic_media_previous, Gravity.START or Gravity.CENTER_VERTICAL)
         btnPrev.setOnClickListener { changeChannel(false); resetHideTimer() }
@@ -179,7 +200,6 @@ class PlayerActivity : AppCompatActivity() {
 
         rootLayout.addView(btnPrev)
         rootLayout.addView(btnNext)
-
         val watermark = TextView(this).apply {
             text = "S"
             textSize = 14f
@@ -198,10 +218,10 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
         rootLayout.addView(watermark)
+
         setContentView(rootLayout)
         showOverlayControls()
     }
-
     private fun loadChannelData() {
         val list = channelsList
         if (!list.isNullOrEmpty() && currentChannelIndex in list.indices) {
@@ -232,42 +252,39 @@ class PlayerActivity : AppCompatActivity() {
     private fun initializePlayer(url: String, drmKey: String, referer: String, userAgent: String) {
         player?.release()
 
-        // Validate stream URL
         if (!StreamTypeConfig.isValidStreamUrl(url)) {
             android.util.Log.e("PlayerActivity", "[v0] Invalid stream URL: $url")
             return
         }
 
-        // Detect stream type using professional configuration
         val streamConfig = StreamTypeConfig.detectStreamType(url)
-        android.util.Log.d("PlayerActivity", "[v0] Detected stream type: ${streamConfig.type}, MIME: ${streamConfig.mimeType}")
-
         val bandwidthMeter = DefaultBandwidthMeter.Builder(this).build()
 
-        val trackSelectionFactory = AdaptiveTrackSelection.Factory()
-        val trackSelector = DefaultTrackSelector(this, trackSelectionFactory)
+        val trackSelector = DefaultTrackSelector(this, AdaptiveTrackSelection.Factory())
         trackSelector.parameters = trackSelector.buildUponParameters()
             .setPreferredAudioLanguages("ar", "fr", "en")
             .setPreferredTextLanguage("ar")
-            .setSelectUndeterminedTextLanguage(true)
-            .setForceHighestSupportedBitrate(false)
             .build()
 
         val renderersFactory = DefaultRenderersFactory(this).apply {
             setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             setEnableDecoderFallback(true)
         }
-
-        // Build headers optimized for detected stream type
         val customHeaders = mutableMapOf<String, String>()
         customHeaders.putAll(StreamTypeConfig.getOptimalHeaders(streamConfig.type))
-        if (referer.isNotEmpty()) customHeaders["Referer"] = referer
 
-        val finalUserAgent = userAgent.ifEmpty {
-            StreamTypeConfig.getOptimalUserAgent(streamConfig.type)
+        var origin = referer
+        var currentReferer = referer
+        if (url.lowercase().contains("shahid") || url.lowercase().contains("edgenext")) {
+            if (origin.isEmpty()) origin = "https://shahid.mbc.net"
+            if (currentReferer.isEmpty()) currentReferer = "https://shahid.mbc.net/"
         }
 
-        // Build OkHttp client with timeout optimized for stream type
+        if (currentReferer.isNotEmpty()) customHeaders["Referer"] = currentReferer
+        if (origin.isNotEmpty()) customHeaders["Origin"] = origin
+
+        val finalUserAgent = userAgent.ifEmpty { StreamTypeConfig.getOptimalUserAgent(streamConfig.type) }
+
         val okHttpFactory = OkHttpDataSource.Factory(getOptimizedHttpClient(streamConfig.type))
             .setUserAgent(finalUserAgent)
             .setDefaultRequestProperties(customHeaders)
@@ -275,45 +292,60 @@ class PlayerActivity : AppCompatActivity() {
         val dataSourceFactory = DefaultDataSource.Factory(this, okHttpFactory)
             .setTransferListener(bandwidthMeter)
 
-        // Set MIME type based on detected stream type
+        val extractorsFactory = DefaultExtractorsFactory().apply {
+            setTsExtractorFlags(DefaultTsPayloadReaderFactory.FLAG_ALLOW_NON_IDR_KEYFRAMES)
+            setTsExtractorTimestampSearchBytes(225600)
+        }
+
+        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory, extractorsFactory)
+            .setLoadErrorHandlingPolicy(errorHandlingPolicy)
+            .setLoadErrorHandlingPolicy(DashErrorHandlingPolicy())
         val mediaItemBuilder = MediaItem.Builder()
             .setUri(url.toUri())
             .setMimeType(streamConfig.mimeType)
 
-        // Configure DRM only if stream type requires it
-        if (streamConfig.isDrmRequired && drmKey.isNotEmpty()) {
+        if (drmKey.isNotEmpty()) {
             try {
-                val drmConfig = parseClearKeyDRM(drmKey)
-                if (drmConfig != null) {
+                if (drmKey.contains(":")) {
+                    val parts = drmKey.split(":")
+                    val kid = parts[0]
+                    val key = parts[1]
+
+                    val clearKeyJson = """
+                    {
+                      "keys": [
+                        {
+                          "kty": "oct",
+                          "k": "${base64UrlEncode(key)}",
+                          "kid": "${base64UrlEncode(kid)}"
+                        }
+                      ],
+                      "type": "temporary"
+                    }
+                """.trimIndent()
+
                     mediaItemBuilder.setDrmConfiguration(
                         MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
-                            .setLicenseUri(drmConfig)
+                            .setLicenseUri("data:application/json,$clearKeyJson")
+                            .build()
+                    )
+                    android.util.Log.d("PlayerActivity", "Applied Manual ClearKey DRM")
+                } else {
+                    mediaItemBuilder.setDrmConfiguration(
+                        MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
+                            .setLicenseUri(drmKey)
                             .setMultiSession(true)
                             .setForceDefaultLicenseUri(true)
                             .build()
                     )
-                    android.util.Log.d("PlayerActivity", "[v0] DRM Configuration applied successfully")
-                } else {
-                    android.util.Log.w("PlayerActivity", "[v0] DRM key provided but parsing failed")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("PlayerActivity", "[v0] DRM configuration error: ${e.message}")
-                e.printStackTrace()
+                android.util.Log.e("PlayerActivity", "DRM Config Error: ${e.message}")
             }
         }
 
-        // Create media source factory with appropriate error handling
-        val mediaSourceFactory = DefaultMediaSourceFactory(dataSourceFactory)
-            .setLoadErrorHandlingPolicy(
-                when (streamConfig.type) {
-                    StreamTypeConfig.StreamType.DASH_MPD -> DashErrorHandlingPolicy()
-                    else -> errorHandlingPolicy
-                }
-            )
-
         player = ExoPlayer.Builder(this, renderersFactory)
             .setTrackSelector(trackSelector)
-            .setBandwidthMeter(bandwidthMeter)
             .setMediaSourceFactory(mediaSourceFactory)
             .build().apply {
                 playerView.player = this
@@ -322,8 +354,6 @@ class PlayerActivity : AppCompatActivity() {
                 playWhenReady = true
                 addListener(playerListener)
             }
-
-        setupSubtitleStyle()
     }
 
     // Optimized HTTP client with timeout based on stream type
@@ -443,52 +473,68 @@ class PlayerActivity : AppCompatActivity() {
      */
     private fun isBase64(s: String): Boolean {
         return try {
-            Base64.decode(s, Base64.URL_SAFE or Base64.DEFAULT)
+            Base64.decode(s, Base64.DEFAULT)
             true
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
-    private fun setupSubtitleStyle() {
-        val isTelevision = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_TYPE_MASK) == android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
-        playerView.subtitleView?.apply {
-            setApplyEmbeddedStyles(false)
-            setFixedTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, if (isTelevision) 34f else 22f)
-            setStyle(CaptionStyleCompat(Color.WHITE, Color.TRANSPARENT, Color.TRANSPARENT, CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW, Color.BLACK, null))
+    private fun base64UrlEncode(hexString: String): String {
+        return try {
+            val bytes = hexStringToByteArray(hexString.replace(" ", ""))
+            Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivity", "Encoding error: ${e.message}")
+            ""
         }
     }
 
     private val playerListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
             bufferingHandler.removeCallbacks(bufferingRunnable)
-            android.util.Log.e("PlayerActivity", "[v0] PlaybackException Code: ${error.errorCode}, Message: ${error.message}")
+            val errorMsg = error.message ?: "Unknown error"
+            android.util.Log.e("PlayerActivity", "[v0] PlaybackException Code: ${error.errorCode}, Message: $errorMsg")
             error.printStackTrace()
 
-            when (error.errorCode) {
-                PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> {
+            when {
+                // DRM-related errors
+                error.errorCode == PlaybackException.ERROR_CODE_DRM_UNSPECIFIED ||
+                        errorMsg.contains("DRM", ignoreCase = true) ||
+                        errorMsg.contains("license", ignoreCase = true) -> {
+                    android.util.Log.e("PlayerActivity", "[v0] ❌ DRM Error: $errorMsg")
+                    // DRM errors - usually need manual intervention
+                    bufferingHandler.postDelayed({
+                        player?.prepare()
+                    }, 3000)
+                }
+
+                error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW -> {
                     android.util.Log.d("PlayerActivity", "[v0] Behind live window, seeking to default position")
                     player?.seekToDefaultPosition()
                     player?.prepare()
                 }
-                PlaybackException.ERROR_CODE_UNSPECIFIED,
-                PlaybackException.ERROR_CODE_REMOTE_ERROR,
-                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
-                PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> {
+
+                error.errorCode == PlaybackException.ERROR_CODE_UNSPECIFIED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_REMOTE_ERROR ||
+                        error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED ||
+                        error.errorCode == PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> {
                     // Network/IO issues - retry with backoff
                     android.util.Log.d("PlayerActivity", "[v0] Network error, retrying in 2 seconds")
                     bufferingHandler.postDelayed({
                         player?.prepare()
                     }, 2000)
                 }
-                PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> {
+
+                error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED -> {
                     // DASH manifest parsing failed - try again
                     android.util.Log.e("PlayerActivity", "[v0] Manifest parsing failed, retrying...")
                     bufferingHandler.postDelayed({
                         player?.prepare()
                     }, 1500)
                 }
+
                 else -> {
-                    android.util.Log.d("PlayerActivity", "[v0] Other error, retrying playback")
+                    android.util.Log.d("PlayerActivity", "[v0] Other error (${error.errorCode}), retrying playback")
                     bufferingHandler.postDelayed({
                         player?.prepare()
                     }, 1000)
@@ -632,7 +678,14 @@ class PlayerActivity : AppCompatActivity() {
             systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
     }
-
+    private fun updatePlayerViewMode() {
+        val orientation = resources.configuration.orientation
+        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+        } else {
+            playerView.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+        }
+    }
     override fun onDestroy() {
         super.onDestroy()
         bufferingHandler.removeCallbacksAndMessages(null)
