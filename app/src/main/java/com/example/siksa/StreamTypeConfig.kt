@@ -57,15 +57,18 @@ object StreamTypeConfig {
                 )
             }
 
-            // TS/MPEG-TS segments
-            lowerUrl.contains(".ts") && !lowerUrl.contains(".mpd") ||
-                    lowerUrl.contains("extension=ts") ||
-                    lowerUrl.contains("f=ts") -> {
+            // TS/MPEG-TS segments & IPTV Direct Links
+            lowerUrl.contains(".ts") || 
+            lowerUrl.contains("extension=ts") || 
+            lowerUrl.contains("f=ts") ||
+            lowerUrl.contains("output=ts") ||
+            lowerUrl.contains("type=ts") ||
+            (lowerUrl.endsWith(".ts") || lowerUrl.contains(".ts?")) -> {
                 StreamConfig(
                     type = StreamType.MPEG_TS,
                     mimeType = MimeTypes.VIDEO_MP2T,
-                    optimizedTimeout = 20000L,
-                    description = "MPEG-TS Stream"
+                    optimizedTimeout = 30000L, 
+                    description = "MPEG-TS IPTV Stream"
                 )
             }
 
