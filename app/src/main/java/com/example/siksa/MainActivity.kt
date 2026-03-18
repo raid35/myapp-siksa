@@ -158,7 +158,6 @@ class MainActivity : AppCompatActivity() {
         if (getExternalM3uUrl() != null) recreate()
     }
 }
-
 @Composable
 fun PackageListScreen(
     selectedIndex: Int?,
@@ -175,11 +174,26 @@ fun PackageListScreen(
             .crossfade(true)
             .build()
     }
+
     LaunchedEffect(Unit) {
-        packages = loadPackagesFromM3u("https://raw.githubusercontent.com/raid35/channel-links/main/siksa_tv.m3u")
-        selectedIndex?.let {
-            val rowIndex = it / 5
-            listState.scrollToItem(rowIndex)
+        val encodedUrl = "aHR0cHM6Ly9yYXcuZ2l0aHVidXNlcmNvbnRlbnQuY29tL3JhaWQzNS9jaGFubmVsLWxpbmtzL21haW4vc2lrc2FfdHYubTN1"
+        val decodedUrl = try {
+            val data = android.util.Base64.decode(encodedUrl, android.util.Base64.DEFAULT)
+            String(data, Charsets.UTF_8)
+        } catch (e: Exception) {
+            ""
+        }
+        if (decodedUrl.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                val loadedPackages = loadPackagesFromM3u(decodedUrl)
+                withContext(Dispatchers.Main) {
+                    packages = loadedPackages
+                    selectedIndex?.let {
+                        val rowIndex = it / 5
+                        listState.scrollToItem(rowIndex)
+                    }
+                }
+            }
         }
     }
 
@@ -199,6 +213,7 @@ fun PackageListScreen(
                     val actualIndex = rowIndex * 5 + itemIndex
                     var isFocused by remember { mutableStateOf(false) }
                     val focusRequester = remember { FocusRequester() }
+
                     LaunchedEffect(packages) {
                         if (selectedIndex == actualIndex) {
                             delay(50)
