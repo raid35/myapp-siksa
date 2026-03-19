@@ -305,31 +305,43 @@ class PlayerActivity : AppCompatActivity() {
 
         if (drmKey.isNotEmpty()) {
             try {
-                if (drmKey.contains(":")) {
-                    val parts = drmKey.split(":")
-                    val kid = parts[0]
-                    val key = parts[1]
+                android.util.Log.d("PlayerActivity", "[v0] Processing DRM configuration...")
+                val licenseUri = parseClearKeyDRM(drmKey)
 
-                    val clearKeyJson = """
-                    {
-                      "keys": [
-                        {
-                          "kty": "oct",
-                          "k": "${base64UrlEncode(key)}",
-                          "kid": "${base64UrlEncode(kid)}"
-                        }
-                      ],
-                      "type": "temporary"
-                    }
-                """.trimIndent()
-
+                if (licenseUri != null) {
                     mediaItemBuilder.setDrmConfiguration(
                         MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
-                            .setLicenseUri("data:application/json,$clearKeyJson")
+                            .setLicenseUri(licenseUri)
                             .build()
                     )
-                    android.util.Log.d("PlayerActivity", "Applied Manual ClearKey DRM")
-                } else {
+                    android.util.Log.d("PlayerActivity", "[v0] ✓ Applied ClearKey DRM configuration")
+                } else if (drmKey.contains(":") && !drmKey.startsWith("http")) {
+                    val parts = drmKey.split(":", limit = 2)
+                    if (parts.size == 2) {
+                        val kid = parts[0].trim()
+                        val key = parts[1].trim()
+
+                        val clearKeyJson = """
+                        {
+                          "keys": [
+                            {
+                              "kty": "oct",
+                              "k": "${base64UrlEncode(key)}",
+                              "kid": "${base64UrlEncode(kid)}"
+                            }
+                          ],
+                          "type": "temporary"
+                        }
+                    """.trimIndent()
+
+                        mediaItemBuilder.setDrmConfiguration(
+                            MediaItem.DrmConfiguration.Builder(C.CLEARKEY_UUID)
+                                .setLicenseUri("data:application/json,$clearKeyJson")
+                                .build()
+                        )
+                        android.util.Log.d("PlayerActivity", "[v0] ✓ Applied Manual ClearKey DRM from kid:key")
+                    }
+                } else if (drmKey.startsWith("http")) {
                     mediaItemBuilder.setDrmConfiguration(
                         MediaItem.DrmConfiguration.Builder(C.WIDEVINE_UUID)
                             .setLicenseUri(drmKey)
@@ -337,9 +349,11 @@ class PlayerActivity : AppCompatActivity() {
                             .setForceDefaultLicenseUri(true)
                             .build()
                     )
+                    android.util.Log.d("PlayerActivity", "[v0] ✓ Applied Widevine DRM configuration")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("PlayerActivity", "DRM Config Error: ${e.message}")
+                android.util.Log.e("PlayerActivity", "[v0] DRM Config Error: ${e.message}")
+                e.printStackTrace()
             }
         }
 
@@ -379,56 +393,96 @@ class PlayerActivity : AppCompatActivity() {
             }
         }
     }
+    private fun parseAdvancedDRM(drmInfo: String): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+
+        try {
+            val trimmed = drmInfo.trim()
+            if (trimmed.contains("inputstream.adaptive.license_key=")) {
+                val licenseKey = trimmed.substringAfter("inputstream.adaptive.license_key=")
+                    .split("\n", "#")
+                    .firstOrNull()?.trim() ?: ""
+
+                if (licenseKey.isNotEmpty()) {
+                    result["license_key"] = licenseKey
+                    result["drm_type"] = "clearkey"
+                    android.util.Log.d("PlayerActivity", "[v0] Extracted KODIPROP license key: ${licenseKey.take(30)}...")
+                }
+            }
+            if (trimmed.contains("http-drm-scheme=")) {
+                val drmScheme = trimmed.substringAfter("http-drm-scheme=")
+                    .split(" ", "\n", "#")
+                    .firstOrNull()?.trim() ?: ""
+
+                if (drmScheme.isNotEmpty()) {
+                    result["drm_scheme"] = drmScheme
+                    android.util.Log.d("PlayerActivity", "[v0] Extracted DRM scheme: $drmScheme")
+                }
+            }
+            if (trimmed.contains("drm-info=clearkey|") || trimmed.contains("drm-info=clearkey:")) {
+                val drmPart = trimmed.substringAfter("drm-info=clearkey").trim()
+                    .removePrefix("|").removePrefix(":")
+                    .split("\n", " ", "#")
+                    .firstOrNull()?.trim() ?: ""
+
+                if (drmPart.isNotEmpty()) {
+                    result["license_key"] = drmPart
+                    result["drm_type"] = "clearkey"
+                    android.util.Log.d("PlayerActivity", "[v0] Extracted drm-info license key")
+                }
+            }
+
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivity", "[v0] Error parsing advanced DRM: ${e.message}")
+        }
+
+        return result
+    }
 
     private fun parseClearKeyDRM(drmKey: String): String? {
         return try {
             val trimmed = drmKey.trim()
+            val advancedDRM = parseAdvancedDRM(trimmed)
+            if (advancedDRM.isNotEmpty()) {
+                val licenseKey = advancedDRM["license_key"] ?: ""
+                if (licenseKey.isNotEmpty()) {
+                    return buildClearKeyLicense(licenseKey)
+                }
+            }
 
             android.util.Log.d("PlayerActivity", "[v0] Parsing DRM Key - Format: ${if (trimmed.contains(":")) "hex:hex" else if (trimmed.startsWith("{")) "JSON" else "Unknown"}")
-
-            // ===== Handle format: kid:key (hex:hex) =====
             if (trimmed.contains(":") && !trimmed.startsWith("{")) {
                 val parts = trimmed.split(":", limit = 2)
                 if (parts.size == 2) {
                     val kid = parts[0].trim()
                     val k = parts[1].trim()
-
-                    // Validate hex format
                     if (!isValidHex(kid) || !isValidHex(k)) {
                         android.util.Log.e("PlayerActivity", "[v0] Invalid hex in DRM key: kid=$kid, k=$k")
                         return null
                     }
-
-                    // Build ClearKey JSON: the key must be base64url encoded
                     val base64EncodedKey = Base64.encodeToString(hexStringToByteArray(k), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
                     val base64EncodedKid = Base64.encodeToString(hexStringToByteArray(kid), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 
                     val json = """{"keys":[{"kty":"oct","k":"$base64EncodedKey","kid":"$base64EncodedKid"}],"type":"temporary"}"""
                     val base64License = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
 
-                    android.util.Log.d("PlayerActivity", "[v0] ✓ ClearKey DRM prepared (hex:hex format) - License URI created")
+                    android.util.Log.d("PlayerActivity", "[v0] ✓ ClearKey DRM prepared (hex:hex format)")
                     return "data:application/json;base64,$base64License"
                 }
             }
-
-            // ===== Handle JSON format =====
             if (trimmed.startsWith("{")) {
                 val base64License = Base64.encodeToString(trimmed.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-                android.util.Log.d("PlayerActivity", "[v0] ✓ ClearKey DRM prepared (JSON format) - License URI created")
+                android.util.Log.d("PlayerActivity", "[v0] ✓ ClearKey DRM prepared (JSON format)")
                 return "data:application/json;base64,$base64License"
             }
-
-            // ===== Handle base64-encoded URL with DRM info =====
             if (isBase64(trimmed)) {
                 try {
                     val decoded = String(Base64.decode(trimmed, Base64.URL_SAFE or Base64.DEFAULT))
 
-                    // Check if decoded string contains DRM info (like drm-info=clearkey|kid:key)
                     if (decoded.contains("drm-info=clearkey") && decoded.contains("|")) {
                         val drmPart = decoded.substringAfter("drm-info=clearkey|").split("&").firstOrNull() ?: ""
                         if (drmPart.contains(":")) {
                             android.util.Log.d("PlayerActivity", "[v0] Extracting DRM from base64 URL: $drmPart")
-                            // Recursively parse the extracted DRM key
                             return parseClearKeyDRM(drmPart)
                         }
                     }
@@ -447,10 +501,80 @@ class PlayerActivity : AppCompatActivity() {
             null
         }
     }
+    private fun buildClearKeyLicense(licenseKey: String): String? {
+        return try {
+            val trimmed = licenseKey.trim()
+            if (trimmed.contains(":") && !trimmed.startsWith("{")) {
+                val parts = trimmed.split(":", limit = 2)
+                if (parts.size == 2) {
+                    val kid = parts[0].trim()
+                    val key = parts[1].trim()
+
+                    if (isValidHex(kid) && isValidHex(key)) {
+                        val base64Key = Base64.encodeToString(hexStringToByteArray(key), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                        val base64Kid = Base64.encodeToString(hexStringToByteArray(kid), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+
+                        val json = """{"keys":[{"kty":"oct","k":"$base64Key","kid":"$base64Kid"}],"type":"temporary"}"""
+                        val license = Base64.encodeToString(json.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+
+                        android.util.Log.d("PlayerActivity", "[v0] ✓ Built ClearKey license from kid:key")
+                        return "data:application/json;base64,$license"
+                    }
+                }
+            }
+            if (trimmed.startsWith("{")) {
+                val license = Base64.encodeToString(trimmed.toByteArray(), Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                android.util.Log.d("PlayerActivity", "[v0] ✓ Built ClearKey license from JSON")
+                return "data:application/json;base64,$license"
+            }
+
+            null
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivity", "[v0] Error building ClearKey license: ${e.message}")
+            null
+        }
+    }
 
     /**
      * Convert hex string to byte array
      */
+    fun extractM3uMediaInfo(m3uLine: String): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+
+        try {
+            if (m3uLine.contains("#EXTINF")) {
+                val extinf = m3uLine.substringAfter("#EXTINF:").split("\n").firstOrNull() ?: ""
+                result["extinf"] = extinf
+            }
+            val lines = m3uLine.split("\n")
+            var streamUrl = ""
+            var drmInfo = ""
+
+            for (line in lines) {
+                when {
+                    line.startsWith("#EXTVLCOPT") -> {
+                        drmInfo += "$line\n"
+                    }
+                    line.startsWith("#KODIPROP") -> {
+                        drmInfo += "$line\n"
+                    }
+                    line.startsWith("http") -> {
+                        streamUrl = line.trim()
+                    }
+                }
+            }
+
+            if (streamUrl.isNotEmpty()) result["url"] = streamUrl
+            if (drmInfo.isNotEmpty()) result["drm"] = drmInfo
+
+            android.util.Log.d("PlayerActivity", "[v0] Extracted M3U media info - URL: ${streamUrl.take(50)}, DRM: ${drmInfo.isNotEmpty()}")
+        } catch (e: Exception) {
+            android.util.Log.e("PlayerActivity", "[v0] Error extracting M3U media info: ${e.message}")
+        }
+
+        return result
+    }
+
     private fun hexStringToByteArray(s: String): ByteArray {
         val len = s.length
         val data = ByteArray(len / 2)
@@ -621,23 +745,44 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun extractMediaInfo(fullLine: String): Map<String, String> {
         val info = mutableMapOf<String, String>()
-        val parts = fullLine.split("|")
+        if (fullLine.contains("#EXTINF") || fullLine.contains("#EXTVLCOPT") || fullLine.contains("#KODIPROP")) {
+            android.util.Log.d("PlayerActivity", "[v0] Detected M3U format with advanced tags")
+            val m3uInfo = extractM3uMediaInfo(fullLine)
 
-        if (parts.isNotEmpty()) {
-            info["url"] = parts[0].trim()
-            for (i in 1 until parts.size) {
-                val part = parts[i].trim()
-                when {
-                    part.startsWith("userAgent=", ignoreCase = true) ->
-                        info["userAgent"] = part.substringAfter("=").trim()
-
-                    part.startsWith("referer=", ignoreCase = true) ->
-                        info["referer"] = part.substringAfter("=").trim()
-                    part.startsWith("drm=", ignoreCase = true) || part.startsWith("license_key=", ignoreCase = true) ->
-                        info["drm"] = part.substringAfter("=").trim()
+            if (m3uInfo.isNotEmpty()) {
+                if (m3uInfo.containsKey("url")) {
+                    info["url"] = m3uInfo["url"]!!
+                }
+                if (m3uInfo.containsKey("drm")) {
+                    val drmInfo = m3uInfo["drm"]!!
+                    val drmKey = parseAdvancedDRM(drmInfo)["license_key"]
+                    if (drmKey != null) {
+                        info["drm"] = drmKey
+                        android.util.Log.d("PlayerActivity", "[v0] Extracted DRM from M3U tags")
+                    }
                 }
             }
         }
+        if (info["url"].isNullOrEmpty()) {
+            val parts = fullLine.split("|")
+
+            if (parts.isNotEmpty()) {
+                info["url"] = parts[0].trim()
+                for (i in 1 until parts.size) {
+                    val part = parts[i].trim()
+                    when {
+                        part.startsWith("userAgent=", ignoreCase = true) ->
+                            info["userAgent"] = part.substringAfter("=").trim()
+
+                        part.startsWith("referer=", ignoreCase = true) ->
+                            info["referer"] = part.substringAfter("=").trim()
+                        part.startsWith("drm=", ignoreCase = true) || part.startsWith("license_key=", ignoreCase = true) ->
+                            info["drm"] = part.substringAfter("=").trim()
+                    }
+                }
+            }
+        }
+
         return info
     }
 
